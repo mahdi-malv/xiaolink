@@ -89,7 +89,7 @@ class GlassesViewModel(app: Application) : AndroidViewModel(app) {
     private var link: SppLink? = null
     private var session: WearSession? = null
     private val time = SimpleDateFormat("HH:mm:ss", Locale.US)
-    private val ai = AiAssistant(BuildConfig.GEMINI_API_KEY, BuildConfig.GEMINI_MODEL,
+    private val ai = AiAssistant(BuildConfig.GEMINI_API_KEY, BuildConfig.GEMINI_MODEL, BuildConfig.GEMINI_VISION_MODEL,
         sendToGlasses = { packet -> session?.send(packet) },
         log = ::log,
         onState = { st -> _ui.update { it.copy(aiState = st) } })
@@ -429,6 +429,7 @@ class GlassesViewModel(app: Application) : AndroidViewModel(app) {
             payload?.let { voicePayload?.write(it) }
         }
         voicePackets++; voiceBytes += data.size
+        if (type != -1 && type != 1 && type != 2) handleVoiceImage(type, data)
         if (voicePackets <= 5 || cmd != 2 || voicePackets % 50 == 0) {
             val head = Proto.hex(data.copyOfRange(0, minOf(data.size, 24)))
             log("Voice #$voicePackets cmd=$cmd type=$type size=${data.size} head=$head")
@@ -436,7 +437,47 @@ class GlassesViewModel(app: Application) : AndroidViewModel(app) {
         if (cmd == 3 || cmd == 4) closeVoiceCapture()
     }
 
+    private val aiImageDir get() = java.io.File(getApplication<Application>().getExternalFilesDir(null), "ai-images").apply { mkdirs() }
+    private var aiImage: java.io.ByteArrayOutputStream? = null
+    private var aiImageType = 0
+    private var aiImageTotal = 0
+
+    /**
+     * Device-verified: AI images on the voice channel (MiWearVoiceHandler$onReceivedVoiceData$1$result$1.java:165-247,
+     * VoiceMassData.j). Types: 3 FIRST_IMAGE (cropped), 4 FOLLOW_IMAGE, 5 IMAGE_OCR, 8/9 small/large picture
+     * of conversation record, 11 IMAGE_HD_FOLLOW. Header after type: u32 BE totalLength, u16 BE contentLength.
+     * First types (3/5/8/9/10) start a buffer, follow types append; saved to files/ai-images/.
+     * A complete type 3 JPEG goes to [AiAssistant.onImage] (take_photo tool).
+     */
+    private fun handleVoiceImage(type: Int, data: ByteArray) {
+        val total = if (data.size >= 12) java.nio.ByteBuffer.wrap(data, 6, 4).int else -1
+        val content = if (data.size >= 12) ((data[10].toInt() and 255) shl 8) or (data[11].toInt() and 255) else -1
+        val payload = if (data.size > 12) data.copyOfRange(12, data.size) else ByteArray(0)
+        if (type != 4 && type != 11) {
+            log("AI image type=$type total=$total content=$content")
+            saveAiImage()
+            aiImage = java.io.ByteArrayOutputStream(); aiImageType = type; aiImageTotal = total
+        }
+        aiImage?.write(payload)
+        if (aiImageTotal > 0 && (aiImage?.size() ?: 0) >= aiImageTotal) saveAiImage()
+    }
+
+    private fun saveAiImage() {
+        val bytes = aiImage?.toByteArray() ?: return
+        aiImage = null
+        val ext = when {
+            bytes.size > 3 && bytes[0] == 0xFF.toByte() && bytes[1] == 0xD8.toByte() -> "jpg"
+            bytes.size > 3 && bytes[0] == 0x89.toByte() && bytes[1] == 'P'.code.toByte() -> "png"
+            else -> "bin"
+        }
+        val name = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date()) + "-t$aiImageType.$ext"
+        runCatching { java.io.File(aiImageDir, name).writeBytes(bytes) }
+        log("AI image saved: ai-images/$name (${bytes.size} of $aiImageTotal B)")
+        if (aiImageType == 3 && ext == "jpg" && bytes.size == aiImageTotal) ai.onImage(bytes)
+    }
+
     private fun closeVoiceCapture() {
+        saveAiImage()
         if (voiceRaw == null) return
         log("Voice capture ended: $voicePackets packets, $voiceBytes B")
         runCatching { voiceRaw?.close(); voicePayload?.close() }

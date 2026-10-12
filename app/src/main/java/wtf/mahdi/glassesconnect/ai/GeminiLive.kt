@@ -15,6 +15,8 @@ import java.util.concurrent.TimeUnit
  * Gemini Live API session over WebSocket (ai.google.dev/api/live).
  * Input: 16 kHz s16le PCM. Output: PCM chunks with the rate from inlineData.mimeType (24 kHz by default).
  * Server voice activity detection decides when the user stops speaking.
+ * Tools: [TOOL_TAKE_PHOTO] {question}. The client answers the toolCall with [sendToolResponse] (text only: the session
+ * never holds images, so answers cannot come from an older photo).
  */
 class GeminiLive(
     private val apiKey: String,
@@ -29,6 +31,7 @@ class GeminiLive(
         fun onOutputText(text: String)
         fun onInterrupted()
         fun onTurnComplete()
+        fun onToolCall(id: String, name: String, args: JSONObject)
         fun onClosed(reason: String)
     }
 
@@ -58,6 +61,9 @@ class GeminiLive(
     fun sendAudio(pcm: ByteArray) = send(JSONObject().put("realtimeInput", JSONObject().put("audio",
         JSONObject().put("data", Base64.encodeToString(pcm, Base64.NO_WRAP)).put("mimeType", "audio/pcm;rate=16000"))).toString())
 
+    fun sendToolResponse(id: String, name: String, response: JSONObject) = send(JSONObject().put("toolResponse",
+        JSONObject().put("functionResponses", JSONArray().put(JSONObject().put("id", id).put("name", name).put("response", response)))).toString())
+
     /** Tells the server the microphone is off so it can finish the turn. */
     fun endAudio() = send(JSONObject().put("realtimeInput", JSONObject().put("audioStreamEnd", true)).toString())
 
@@ -74,6 +80,14 @@ class GeminiLive(
         .put("model", "models/$model")
         .put("generationConfig", JSONObject().put("responseModalities", JSONArray().put("AUDIO")))
         .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", systemPrompt))))
+        .put("tools", JSONArray().put(JSONObject().put("functionDeclarations", JSONArray().put(JSONObject()
+            .put("name", TOOL_TAKE_PHOTO)
+            .put("description", "Takes a new photo with the camera on the user's glasses, from the user's point of view, " +
+                "and answers a question about it. Call it every time the question needs to see what the user is looking at now.")
+            .put("parameters", JSONObject().put("type", "OBJECT")
+                .put("properties", JSONObject().put("question", JSONObject().put("type", "STRING")
+                    .put("description", "The user's question about the photo, with any context needed to answer it.")))
+                .put("required", JSONArray().put("question")))))))
         .put("inputAudioTranscription", JSONObject())
         .put("outputAudioTranscription", JSONObject()))
 
@@ -84,6 +98,9 @@ class GeminiLive(
             listener.onReady()
         }
         msg.optJSONObject("goAway")?.let { listener.onClosed("server goAway: $it") }
+        msg.optJSONObject("toolCall")?.optJSONArray("functionCalls")?.let { calls ->
+            for (i in 0 until calls.length()) calls.optJSONObject(i)?.let { listener.onToolCall(it.optString("id"), it.optString("name"), it.optJSONObject("args") ?: JSONObject()) }
+        }
         val content = msg.optJSONObject("serverContent") ?: return
         content.optJSONObject("inputTranscription")?.optString("text")?.takeIf { it.isNotEmpty() }?.let(listener::onInputText)
         content.optJSONObject("outputTranscription")?.optString("text")?.takeIf { it.isNotEmpty() }?.let(listener::onOutputText)
@@ -98,6 +115,10 @@ class GeminiLive(
         }
         if (content.optBoolean("interrupted")) listener.onInterrupted()
         if (content.optBoolean("turnComplete")) listener.onTurnComplete()
+    }
+
+    companion object {
+        const val TOOL_TAKE_PHOTO = "take_photo"
     }
 
     private fun closed(reason: String) {

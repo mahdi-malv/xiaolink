@@ -26,6 +26,8 @@ android {
         // Gemini Live API key (Google AI Studio) and model, from local.properties.
         buildConfigField("String", "GEMINI_API_KEY", "\"${localProps.getProperty("gemini.apiKey", "")}\"")
         buildConfigField("String", "GEMINI_MODEL", "\"${localProps.getProperty("gemini.model", "gemini-3.8-live")}\"")
+        // Model that answers take_photo questions (one generateContent call per photo).
+        buildConfigField("String", "GEMINI_VISION_MODEL", "\"${localProps.getProperty("gemini.visionModel", "gemini-flash-lite-latest")}\"")
     }
 
     buildTypes {

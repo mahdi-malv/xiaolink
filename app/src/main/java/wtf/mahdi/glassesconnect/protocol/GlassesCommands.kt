@@ -58,14 +58,34 @@ object GlassesCommands {
     fun aivsStatus(voice: Int, tts: Int = 0, device: Int = 0): ByteArray = aivs(5, Proto.encode {
         message(5) { uint(1, voice); uint(2, tts); uint(3, 0); uint(4, 0); uint(5, 0); uint(6, device) }
     })
-    /** InstructionList with one resultType 3 (STOP_CAPTURE), as MiWearModuleImpl.sendAivsInstruction. */
-    fun aivsStopCapture(): ByteArray = aivs(0, Proto.encode { message(1) { message(1) { uint(1, 3) } } })
+    /**
+     * InstructionList with one resultType 3 (STOP_CAPTURE), as MiWearModuleImpl.sendAivsInstruction → SyncInstructionList.
+     * AivsInstruction.writeTo (AivsProtos.java:1876, 1918) always writes f1 resultType and f13 sessionId (0); without
+     * f13 the glasses ignored the stop (device log). Untested with f13.
+     */
+    fun aivsStopCapture(): ByteArray = aivs(0, Proto.encode { message(1) { message(1) { uint(1, 3); uint(13, 0) } } })
     /** Phone-initiated wake-up (OpenDevice): WakeUpEvent cmd 5 with a fresh request id. */
     fun aivsWake(): ByteArray = aivs(10, Proto.encode {
         message(11) {
             val id = java.util.UUID.randomUUID().toString().replace("-", "")
             message(1) { string(1, id); string(2, id) }
             uint(2, 5)
+        }
+    })
+    /** Request id of the last [aivsMultiModal] START_MM_IMG; START_ORI_IMG reuses it. */
+    var multiModalId = ""
+    /**
+     * Device-verified (cmd 1, 3). RequestAivsMultiModal (bluetooth/command/o95/RequestAivsMultiModal.java, packed id 4): Aivs f4 MultiModal
+     * {f1 AivsRequestInfo {requestId f1, transactionId f2}, f2 cmd} (AivsProtos.java:738, 4803). cmd (MultiModalCmd):
+     * 1 START_MM_IMG, 2 STOP_MM_IMG, 3 START_ORI_IMG, 4 STOP_ORI_IMG. Cloud UploadMultiModal → ImageEventProcess.java:296
+     * sends cmd 1; LargePictureViewModel sends cmd 3. Glasses reply on the voice channel with image mass types 3/4 (cropped)
+     * or 9/11 (original).
+     */
+    fun aivsMultiModal(cmd: Int): ByteArray = aivs(4, Proto.encode {
+        if (cmd == 1 || multiModalId.isEmpty()) multiModalId = java.util.UUID.randomUUID().toString().replace("-", "")
+        message(4) {
+            message(1) { string(1, multiModalId); string(2, multiModalId) }
+            uint(2, cmd)
         }
     })
     fun deviceStatus(): ByteArray = system(1)
@@ -89,6 +109,10 @@ object GlassesCommands {
         Command("ai_listening", "AI: report listening", 14, 5, "AivsStatus voice=recording (2).", true) { aivsStatus(2) },
         Command("ai_wake", "AI: wake from phone", 14, 10, "WakeUpEvent cmd=5 (phone-initiated). Glasses should start streaming mic audio.", true) { aivsWake() },
         Command("ai_stop", "AI: stop capture", 14, 0, "InstructionList STOP_CAPTURE. Ends mic streaming.", true) { aivsStopCapture() },
+        Command("ai_img", "AI: capture image", 14, 4, "MultiModal START_MM_IMG (cmd 1). Glasses take a photo and send a 576x432 JPEG on the voice channel.", true) { aivsMultiModal(1) },
+        Command("ai_img_stop", "AI: stop image", 14, 4, "MultiModal STOP_MM_IMG (cmd 2). Untested.", true) { aivsMultiModal(2) },
+        Command("ai_img_ori", "AI: original image", 14, 4, "MultiModal START_ORI_IMG (cmd 3): last capture again as 960x720 JPEG. No new photo.", true) { aivsMultiModal(3) },
+        Command("ai_img_ori_stop", "AI: stop original", 14, 4, "MultiModal STOP_ORI_IMG (cmd 4). Untested.", true) { aivsMultiModal(4) },
         Command("take_photo", "Take photo", 23, 33, "MIoT action 2.3 take-photo via MIS bridge. Needs did from a MIS report.", true) { misAction(2, 3) },
         Command("toggle_record", "Start/stop video", 23, 33, "MIoT action 2.1 toggle-record via MIS bridge.", true) { misAction(2, 1) },
         Command("special_record", "Special-event record", 23, 33, "MIoT action 2.2 start-special-event-record; meaning unknown.", true) { misAction(2, 2) },

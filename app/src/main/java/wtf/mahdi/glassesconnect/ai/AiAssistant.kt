@@ -4,6 +4,7 @@ import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
 import com.xiaoai.sbc_decoder.SBCDecoder
+import org.json.JSONObject
 import wtf.mahdi.glassesconnect.protocol.GlassesCommands
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledFuture
@@ -14,10 +15,17 @@ import java.util.concurrent.TimeUnit
  * wake-up (glasses touch or phone) -> AivsStatus recording -> mSBC on voice channel -> PCM to Gemini ->
  * first reply audio: STOP_CAPTURE, play reply as media (A2DP to the glasses) -> turn complete: AivsStatus idle.
  * The Gemini session stays open for follow-up questions until [IDLE_CLOSE_S] without a wake-up.
+ * Vision: Gemini calls take_photo -> Aivs MultiModal START_MM_IMG -> glasses send a 576x432 JPEG on the voice
+ * channel ([onImage]) -> STOP_MM_IMG (as AiSpeechEngine.postImageEnd, event 3; without it the glasses LED keeps
+ * blinking) -> [GeminiVision] answers the tool's question from the photo -> text tool response. The Live session never
+ * gets images: realtime video frames were applied a turn late on device (answers described the previous photo).
+ * No image in [PHOTO_TIMEOUT_S] -> error response. The server ends the turn right after toolCall; that turnComplete
+ * must not end our turn (answer audio follows).
  */
 class AiAssistant(
     private val apiKey: String,
     private val model: String,
+    private val visionModel: String,
     private val sendToGlasses: (ByteArray) -> Unit,
     private val log: (String) -> Unit,
     private val onState: (String) -> Unit,
@@ -25,6 +33,8 @@ class AiAssistant(
     private enum class Phase { Idle, Listening, Thinking, Speaking }
 
     private val worker = Executors.newSingleThreadScheduledExecutor { Thread(it, "ai") }
+    private val vision = GeminiVision(apiKey, visionModel)
+    private val visionWorker = Executors.newSingleThreadExecutor { Thread(it, "ai-vision") }
     private val player = Executors.newSingleThreadExecutor { Thread(it, "ai-audio") }
     private val decoder by lazy { SBCDecoder() }
     private var gemini: GeminiLive? = null
@@ -35,6 +45,10 @@ class AiAssistant(
     private var framesWritten = 0L
     private val heard = StringBuilder()
     private val said = StringBuilder()
+    private var photoCall: PhotoCall? = null
+    private var photoTimeout: ScheduledFuture<*>? = null
+    /** Tool response sent; waiting for the answer audio. */
+    private var awaitingAnswer = false
 
     val configured get() = apiKey.isNotBlank()
 
@@ -68,10 +82,39 @@ class AiAssistant(
         }
     }
 
+    /** Complete AI image (JPEG) from the glasses. */
+    fun onImage(jpeg: ByteArray) = worker.execute {
+        val call = photoCall ?: return@execute log("AI: image without a pending take_photo call; ignored")
+        photoCall = null; photoTimeout?.cancel(false)
+        sendToGlasses(GlassesCommands.aivsMultiModal(2))
+        log("AI: asking $visionModel about the photo (${jpeg.size} B): ${call.question}")
+        val started = System.currentTimeMillis()
+        visionWorker.execute {
+            val result = runCatching { vision.ask(jpeg, call.question) }
+            worker.execute {
+                val response = result.fold(
+                    { log("AI vision (${System.currentTimeMillis() - started} ms): $it"); JSONObject().put("result", it) },
+                    { log("AI vision failed: ${it.message}"); JSONObject().put("error", "Could not analyse the photo.") })
+                answerToolCall(call.id, call.name, response)
+            }
+        }
+    }
+
+    private fun answerToolCall(id: String, name: String, response: JSONObject) {
+        gemini?.sendToolResponse(id, name, response)
+        awaitingAnswer = true
+        photoTimeout = worker.schedule({
+            if (!awaitingAnswer) return@schedule
+            awaitingAnswer = false
+            log("AI: no answer from Gemini in ${ANSWER_TIMEOUT_S}s")
+            if (phase != Phase.Idle) finishTurn()
+        }, ANSWER_TIMEOUT_S, TimeUnit.SECONDS)
+    }
+
     fun close() = worker.execute {
         gemini?.close(); gemini = null
         stopPlayback()
-        player.shutdown(); worker.shutdown()
+        player.shutdown(); visionWorker.shutdown(); worker.shutdown()
     }
 
     private fun startListening(source: String): Boolean {
@@ -94,6 +137,7 @@ class AiAssistant(
         override fun onInputText(text: String) { worker.execute { heard.append(text) } }
         override fun onOutputText(text: String) { worker.execute { said.append(text) } }
         override fun onAudio(pcm: ByteArray, sampleRate: Int) = worker.execute {
+            if (awaitingAnswer) { awaitingAnswer = false; photoTimeout?.cancel(false) }
             if (phase == Phase.Listening || phase == Phase.Thinking) {
                 // Close the glasses microphone so the reply is not picked up again.
                 if (phase == Phase.Listening) sendToGlasses(GlassesCommands.aivsStopCapture())
@@ -101,11 +145,33 @@ class AiAssistant(
             }
             if (phase == Phase.Speaking) player.execute { play(pcm, sampleRate) }
         }
+        override fun onToolCall(id: String, name: String, args: JSONObject) = worker.execute {
+            if (name != GeminiLive.TOOL_TAKE_PHOTO) {
+                gemini?.sendToolResponse(id, name, JSONObject().put("error", "Unknown function $name"))
+                return@execute
+            }
+            log("AI: Gemini asked for a photo")
+            if (phase == Phase.Listening) {
+                sendToGlasses(GlassesCommands.aivsStopCapture())
+                setPhase(Phase.Thinking)
+            }
+            photoCall = PhotoCall(id, name, args.optString("question").ifBlank { heard.toString().trim().ifBlank { "What do you see?" } })
+            sendToGlasses(GlassesCommands.aivsMultiModal(1))
+            photoTimeout?.cancel(false)
+            photoTimeout = worker.schedule({
+                if (photoCall?.id != id) return@schedule
+                photoCall = null
+                sendToGlasses(GlassesCommands.aivsMultiModal(2))
+                log("AI: no photo from the glasses in ${PHOTO_TIMEOUT_S}s")
+                answerToolCall(id, name, JSONObject().put("error", "The camera did not return a photo."))
+            }, PHOTO_TIMEOUT_S, TimeUnit.SECONDS)
+        }
         override fun onInterrupted() = worker.execute { log("AI: interrupted"); stopPlayback() }
         override fun onTurnComplete() = worker.execute {
             if (heard.isNotBlank()) log("AI you: ${heard.toString().trim()}")
             if (said.isNotBlank()) log("AI gemini: ${said.toString().trim()}")
             heard.clear(); said.clear()
+            if (photoCall != null || awaitingAnswer) return@execute
             // Report idle after the queued audio finishes playing.
             player.execute {
                 drain()
@@ -115,12 +181,15 @@ class AiAssistant(
         override fun onClosed(reason: String) = worker.execute {
             log("AI: Gemini session closed: $reason")
             gemini = null
+            photoCall = null; awaitingAnswer = false; photoTimeout?.cancel(false)
             if (phase == Phase.Listening) sendToGlasses(GlassesCommands.aivsStopCapture())
             if (phase != Phase.Idle) finishTurn()
         }
     }
 
     private fun finishTurn() {
+        // The glasses keep the mic open after a photo unless told to stop.
+        sendToGlasses(GlassesCommands.aivsStopCapture())
         setPhase(Phase.Idle)
         idleClose?.cancel(false)
         idleClose = worker.schedule({
@@ -169,9 +238,15 @@ class AiAssistant(
         track = null; trackRate = 0; framesWritten = 0
     }
 
+    private class PhotoCall(val id: String, val name: String, val question: String)
+
     companion object {
         const val IDLE_CLOSE_S = 120L
+        const val PHOTO_TIMEOUT_S = 5L
+        const val ANSWER_TIMEOUT_S = 12L
         const val SYSTEM_PROMPT = "You are a voice assistant running on smart glasses. The user hears you through small " +
-            "speakers, so answer briefly and conversationally, in the language the user speaks. No markdown or lists."
+            "speakers, so answer briefly and conversationally, in the language the user speaks. No markdown or lists. " +
+            "The glasses have a camera: when a question is about what the user sees, call take_photo with the question and " +
+            "answer from its result. Call it again for every new visual question; never reuse an earlier result for a new view."
     }
 }
