@@ -8,7 +8,6 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.activity.viewModels
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -34,7 +33,7 @@ import wtf.mahdi.glassesconnect.protocol.Proto
 import wtf.mahdi.glassesconnect.ui.theme.GlassesConnectTheme
 
 class MainActivity : ComponentActivity() {
-    private val vm: GlassesViewModel by viewModels()
+    private val vm by lazy { GlassesController.get(application) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -45,15 +44,17 @@ class MainActivity : ComponentActivity() {
 
 private val permissions = when {
     // Wi-Fi Direct (gallery sync) needs NEARBY_WIFI_DEVICES on 33+, location below.
+    // POST_NOTIFICATIONS: foreground service notification (background session).
     android.os.Build.VERSION.SDK_INT >= 33 -> arrayOf(android.Manifest.permission.BLUETOOTH_CONNECT,
-        android.Manifest.permission.BLUETOOTH_SCAN, android.Manifest.permission.NEARBY_WIFI_DEVICES)
+        android.Manifest.permission.BLUETOOTH_SCAN, android.Manifest.permission.NEARBY_WIFI_DEVICES,
+        android.Manifest.permission.POST_NOTIFICATIONS)
     android.os.Build.VERSION.SDK_INT >= 31 -> arrayOf(android.Manifest.permission.BLUETOOTH_CONNECT,
         android.Manifest.permission.BLUETOOTH_SCAN, android.Manifest.permission.ACCESS_FINE_LOCATION)
     else -> arrayOf(android.Manifest.permission.ACCESS_FINE_LOCATION)
 }
 
 @Composable
-private fun App(vm: GlassesViewModel) {
+private fun App(vm: GlassesController) {
     val ui by vm.ui.collectAsStateWithLifecycle()
     var tab by rememberSaveable { mutableIntStateOf(0) }
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { vm.refreshPaired() }
@@ -94,7 +95,7 @@ private fun StatusBar(ui: UiState) {
 }
 
 @Composable
-private fun ConnectTab(ui: UiState, vm: GlassesViewModel, requestPermissions: () -> Unit) {
+private fun ConnectTab(ui: UiState, vm: GlassesController, requestPermissions: () -> Unit) {
     val context = androidx.compose.ui.platform.LocalContext.current
     Column(Modifier.verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("1. Pair the glasses in Android Bluetooth settings.", style = MaterialTheme.typography.bodyMedium)
@@ -119,12 +120,52 @@ private fun ConnectTab(ui: UiState, vm: GlassesViewModel, requestPermissions: ()
             OutlinedButton(onClick = vm::disconnect) { Text("Disconnect") }
         }
         if (ui.connecting) LinearProgressIndicator(Modifier.fillMaxWidth())
+        BackgroundSection(ui, vm)
         BindSection(ui, vm)
     }
 }
 
+/** Keeps the session alive in the background: CDM association and battery exemption. */
 @Composable
-private fun BindSection(ui: UiState, vm: GlassesViewModel) {
+private fun BackgroundSection(ui: UiState, vm: GlassesController) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    // Re-read on resume (the user returns from a system dialog or settings screen).
+    var tick by remember { mutableIntStateOf(0) }
+    androidx.lifecycle.compose.LifecycleResumeEffect(Unit) { tick++; onPauseOrDispose { } }
+    val associated = remember(tick, ui.address) { CompanionLink.isAssociated(context, ui.address) }
+    val batteryOk = remember(tick) { CompanionLink.ignoresBatteryOptimizations(context) }
+    val dialog = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { tick++ }
+    OutlinedCard(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Background", style = MaterialTheme.typography.titleSmall)
+            Text("Connect keeps the session up with a notification and reconnects when the glasses return. " +
+                "Disconnect stops it.", style = MaterialTheme.typography.bodySmall)
+            Text("Companion device: " + when {
+                !CompanionLink.supported -> "needs Android 13"
+                associated -> "associated"
+                else -> "not associated"
+            }, style = MaterialTheme.typography.bodySmall)
+            Text("Battery optimization: ${if (batteryOk) "off (unrestricted)" else "on"}", style = MaterialTheme.typography.bodySmall)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (CompanionLink.supported && !associated) OutlinedButton(
+                    onClick = {
+                        CompanionLink.associate(context, ui.address, log = vm::log,
+                            onPending = { dialog.launch(androidx.activity.result.IntentSenderRequest.Builder(it).build()) })
+                    },
+                    enabled = ui.address.isNotBlank(),
+                ) { Text("Associate") }
+                if (!batteryOk) OutlinedButton(onClick = {
+                    @android.annotation.SuppressLint("BatteryLife")
+                    val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, android.net.Uri.parse("package:${context.packageName}"))
+                    context.startActivity(intent)
+                }) { Text("Unrestrict battery") }
+            }
+        }
+    }
+}
+
+@Composable
+private fun BindSection(ui: UiState, vm: GlassesController) {
     OutlinedCard(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Fresh bind (untested)", style = MaterialTheme.typography.titleSmall)
@@ -142,7 +183,7 @@ private fun BindSection(ui: UiState, vm: GlassesViewModel) {
 }
 
 @Composable
-private fun CloudKeySection(cloud: CloudState, vm: GlassesViewModel) {
+private fun CloudKeySection(cloud: CloudState, vm: GlassesController) {
     var user by rememberSaveable(cloud.user) { mutableStateOf(cloud.user) }
     var password by remember { mutableStateOf("") }
     var code by remember { mutableStateOf("") }
@@ -186,7 +227,7 @@ private fun CloudKeySection(cloud: CloudState, vm: GlassesViewModel) {
 }
 
 @Composable
-private fun CommandsTab(ui: UiState, vm: GlassesViewModel) {
+private fun CommandsTab(ui: UiState, vm: GlassesController) {
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         if (!ui.ready) item { Text("Connect and authenticate first.", color = MaterialTheme.colorScheme.error) }
         items(GlassesCommands.catalog, key = { it.key }) { c ->
@@ -208,7 +249,7 @@ private fun CommandsTab(ui: UiState, vm: GlassesViewModel) {
 }
 
 @Composable
-private fun MediaTab(ui: UiState, vm: GlassesViewModel) {
+private fun MediaTab(ui: UiState, vm: GlassesController) {
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         item {
             Text("Press the glasses button (photo) or hold it (video). Sync to gallery copies full-size files over Wi-Fi Direct (files stay on the glasses).",
@@ -260,7 +301,7 @@ private fun MediaRow(f: GlassesEvents.MediaFile, thumb: String?) {
 }
 
 @Composable
-private fun SettingsTab(ui: UiState, vm: GlassesViewModel) {
+private fun SettingsTab(ui: UiState, vm: GlassesController) {
     LaunchedEffect(ui.ready) { if (ui.ready && ui.settings == null) vm.readSettings() }
     val setting = ui.settings
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {

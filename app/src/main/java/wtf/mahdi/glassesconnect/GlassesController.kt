@@ -5,8 +5,12 @@ import android.app.Application
 import android.bluetooth.BluetoothManager
 import android.content.Context
 import android.os.Build
-import androidx.lifecycle.AndroidViewModel
-import androidx.lifecycle.viewModelScope
+import android.os.PowerManager
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -68,8 +72,14 @@ data class CloudState(
     val signedIn: Boolean = false,
 )
 
+/**
+ * App-wide owner of the glasses session, UI state and features. Lives as long as the process;
+ * [GlassesService] keeps the process alive while [keepConnected] is set, so the session and the
+ * AI assistant work with the app in the background or the screen off.
+ */
 @SuppressLint("MissingPermission")
-class GlassesViewModel(app: Application) : AndroidViewModel(app) {
+class GlassesController private constructor(private val app: Application) {
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private val logFile = app.getExternalFilesDir(null)?.let { java.io.File(it, "log.txt") }
     private val prefs = app.getSharedPreferences("glasses", Context.MODE_PRIVATE)
     private val _ui = MutableStateFlow(UiState(
@@ -92,7 +102,13 @@ class GlassesViewModel(app: Application) : AndroidViewModel(app) {
     private val ai = AiAssistant(BuildConfig.GEMINI_API_KEY, BuildConfig.GEMINI_MODEL, BuildConfig.GEMINI_VISION_MODEL,
         sendToGlasses = { packet -> session?.send(packet) },
         log = ::log,
-        onState = { st -> _ui.update { it.copy(aiState = st) } })
+        onState = { st -> _ui.update { it.copy(aiState = st) }; aiWakeLock(st != "Idle") })
+
+    private val wakeLock = app.getSystemService(PowerManager::class.java)
+        .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "GlassesConnect:ai").apply { setReferenceCounted(false) }
+
+    /** Keeps the CPU on during an AI turn (screen off): audio decode, Gemini WebSocket, TTS playback. */
+    private fun aiWakeLock(on: Boolean) = if (on) wakeLock.acquire(10 * 60_000L) else if (wakeLock.isHeld) wakeLock.release() else Unit
 
     /** Asks Gemini from the phone: opens the glasses microphone without the gesture. */
     fun askAi() = ai.askFromPhone()
@@ -107,7 +123,7 @@ class GlassesViewModel(app: Application) : AndroidViewModel(app) {
     fun clearLog() { _ui.update { it.copy(log = emptyList()) }; runCatching { logFile?.writeText("") } }
 
     fun refreshPaired() {
-        val adapter = getApplication<Application>().getSystemService(BluetoothManager::class.java)?.adapter
+        val adapter = app.getSystemService(BluetoothManager::class.java)?.adapter
         val devices = runCatching { adapter?.bondedDevices.orEmpty().map { PairedDevice(it.address, it.name ?: it.address) } }
             .getOrElse { log("Cannot list paired devices: ${it.message}"); emptyList() }
         _ui.update { it.copy(paired = devices.sortedBy { d -> d.name }) }
@@ -121,7 +137,7 @@ class GlassesViewModel(app: Application) : AndroidViewModel(app) {
     /** Runs a blocking cloud call on IO; errors go to the cloud status line and the log. */
     private fun cloudCall(label: String, block: () -> Unit) {
         cloudUpdate { it.copy(busy = true, status = label) }
-        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+        scope.launch(kotlinx.coroutines.Dispatchers.IO) {
             runCatching(block).onFailure { e ->
                 log("Cloud: ${e.message}")
                 cloudUpdate { it.copy(status = "Error: ${e.message}") }
@@ -172,7 +188,16 @@ class GlassesViewModel(app: Application) : AndroidViewModel(app) {
         log("Using encrypt_key of ${device.name.ifEmpty { device.model }} (${device.mac})")
     }
 
+    /** User connect: keeps the session up in the background (foreground service + auto-reconnect). */
     fun connect() {
+        setKeepConnected(true)
+        GlassesService.start(app)
+        CompanionLink.observe(app, _ui.value.address, ::log)
+        reconnectJob?.cancel(); reconnectAttempt = 0
+        openWithToken()
+    }
+
+    private fun openWithToken() {
         val s = _ui.value
         val token = s.token.replace(" ", "")
         if (!Regex("[0-9a-fA-F]+").matches(token) || token.length % 2 != 0) return log("Token must be the hex encrypt_key")
@@ -180,15 +205,47 @@ class GlassesViewModel(app: Application) : AndroidViewModel(app) {
         open(s.address, tokenBytes)
     }
 
+    /** Set by [connect], cleared by [disconnect]. Survives restarts: the service and boot receiver read it. */
+    val keepConnected get() = prefs.getBoolean("keep_connected", false)
+    private fun setKeepConnected(on: Boolean) = prefs.edit().putBoolean("keep_connected", on).apply()
+
+    /** Incremented by every [open]/[closeLink]; callbacks of an older link are ignored. */
+    private val generation = java.util.concurrent.atomic.AtomicInteger()
+    private var reconnectJob: Job? = null
+    private var reconnectAttempt = 0
+
+    /** Retries with backoff (2 s .. 60 s) while [keepConnected]. Not in bind mode. */
+    private fun scheduleReconnect(reason: String) = scope.launch {
+        if (!keepConnected || _ui.value.bind.running) return@launch
+        if (reconnectJob?.isActive == true) return@launch
+        val wait = listOf(2, 5, 10, 20, 30, 60)[minOf(reconnectAttempt, 5)]
+        reconnectAttempt++
+        log("Reconnect in $wait s ($reason)")
+        _ui.update { it.copy(state = "Waiting to reconnect ($wait s)") }
+        reconnectJob = scope.launch {
+            delay(wait * 1000L)
+            if (keepConnected && !_ui.value.ready && !_ui.value.connecting) openWithToken()
+        }
+    }
+
+    /** Fast path when the glasses come back (ACL connect, Bluetooth on, CDM presence). */
+    fun reconnectNow(reason: String) = scope.launch {
+        if (!keepConnected || _ui.value.ready || _ui.value.connecting || _ui.value.bind.running) return@launch
+        log("Reconnect now ($reason)")
+        reconnectJob?.cancel(); reconnectAttempt = 0
+        openWithToken()
+    }
+
     /**
      * Opens RFCOMM and a session. [token] null = bind mode: [onUnauth] runs (on a new thread) once L1 is up,
      * and plain packets go to [onPlain].
      */
     private fun open(address: String, token: ByteArray?, onUnauth: ((WearSession) -> Unit)? = null, onPlain: ((ByteArray) -> Unit)? = null) {
-        val adapter = getApplication<Application>().getSystemService(BluetoothManager::class.java)?.adapter
+        val adapter = app.getSystemService(BluetoothManager::class.java)?.adapter
             ?: return log("No Bluetooth adapter")
         val device = runCatching { adapter.getRemoteDevice(address) }.getOrElse { return log("Bad MAC address") }
-        disconnect()
+        closeLink()
+        val gen = generation.incrementAndGet()
         _ui.update { it.copy(connecting = true, state = "Connecting RFCOMM…") }
         Thread({
             lateinit var newSession: WearSession
@@ -196,19 +253,30 @@ class GlassesViewModel(app: Application) : AndroidViewModel(app) {
                 onBytes = { newSession.receive(it) },
                 onClosed = { e ->
                     log("Socket closed${e?.let { ": ${it.message}" } ?: ""}")
-                    _ui.update { it.copy(ready = false, connecting = false, state = "Disconnected") }
                     binder?.cancel()
+                    if (generation.get() == gen) {
+                        _ui.update { it.copy(ready = false, connecting = false, state = "Disconnected") }
+                        if (token != null) scheduleReconnect("socket closed")
+                    }
                 })
             newSession = WearSession(token, Build.MODEL ?: "Android", Build.VERSION.SDK_INT,
                 write = { runCatching { newLink.write(it) }.onFailure { e -> log("Write failed: ${e.message}") } },
                 listener = object : WearSession.Listener {
                     override fun onState(state: WearSession.State, detail: String) {
+                        if (generation.get() != gen) return
                         _ui.update {
                             it.copy(state = "$state: $detail", ready = state == WearSession.State.Ready,
                                 connecting = state == WearSession.State.Negotiating || state == WearSession.State.Authenticating)
                         }
+                        if (state == WearSession.State.Ready) reconnectAttempt = 0
                         if (state == WearSession.State.Unauthenticated && onUnauth != null) Thread({ onUnauth(newSession) }, "bind").start()
-                        if (state == WearSession.State.Failed) binder?.cancel()
+                        if (state == WearSession.State.Failed) {
+                            binder?.cancel()
+                            // Handshake timeout or transport error: drop the socket so the next attempt starts clean.
+                            if (token != null) scope.launch {
+                                if (generation.get() == gen) { closeLink(); scheduleReconnect("session failed: $detail") }
+                            }
+                        }
                     }
                     override fun onLog(line: String) = log(line)
                     override fun onPacket(packet: ByteArray, response: Boolean) = handlePacket(packet)
@@ -219,14 +287,18 @@ class GlassesViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 log("RFCOMM connecting to $address (bond state ${device.bondState}, name ${device.name})")
                 newLink.open()
+                if (generation.get() != gen) { newLink.close(); newSession.close(); return@Thread }
                 link = newLink; session = newSession
                 log("RFCOMM connected to $address")
                 newSession.start()
             } catch (e: Exception) {
                 newLink.close(); newSession.close()
                 log("Connect failed: ${e.message}")
-                _ui.update { it.copy(connecting = false, state = "Connect failed") }
                 binder?.cancel()
+                if (generation.get() == gen) {
+                    _ui.update { it.copy(connecting = false, state = "Connect failed") }
+                    if (token != null) scheduleReconnect("connect failed")
+                }
             }
         }, "spp-connect").start()
     }
@@ -243,11 +315,12 @@ class GlassesViewModel(app: Application) : AndroidViewModel(app) {
         val address = _ui.value.address
         if (address.isBlank()) return bindUpdate { it.copy(status = "Select the glasses MAC first") }
         if (_ui.value.bind.running) return
-        val app = getApplication<Application>()
+        val app = app
         val btName = runCatching { app.getSystemService(BluetoothManager::class.java)?.adapter?.getRemoteDevice(address)?.name }.getOrNull()
         val phoneId = android.provider.Settings.Secure.getString(app.contentResolver, android.provider.Settings.Secure.ANDROID_ID).orEmpty()
         val loc = Locale.getDefault()
         val locale = if (loc.country.isEmpty()) loc.language.lowercase() else "${loc.language.lowercase()}_${loc.country.lowercase()}"
+        disconnect() // no auto-reconnect during bind
         bindUpdate { BindState(running = true, status = "Connecting in bind mode…") }
         log("Bind: start for $address")
         open(address, null,
@@ -259,7 +332,7 @@ class GlassesViewModel(app: Application) : AndroidViewModel(app) {
                 try {
                     val result = b.run()
                     bindUpdate { it.copy(status = "Bound (did ${result.did}). Fetching key…") }
-                    disconnect()
+                    closeLink()
                     val devices = cloud.devices(auth)
                     log("Cloud: ${devices.size} device(s) after bind: " + devices.joinToString { "${it.model} ${it.mac} did=${it.did}" })
                     cloudUpdate { it.copy(devices = devices) }
@@ -280,7 +353,7 @@ class GlassesViewModel(app: Application) : AndroidViewModel(app) {
             },
             onPlain = { packet -> binder?.onPlain(packet) ?: log("Plain packet before binder ready: ${Proto.hex(packet)}") })
         // The bind thread may never start (RFCOMM or L1 failure); clear running so the button comes back.
-        viewModelScope.launch {
+        scope.launch {
             kotlinx.coroutines.delay(35_000)
             if (binder == null && _ui.value.bind.running && _ui.value.state.let { !it.startsWith("Unauthenticated") }) {
                 bindUpdate { it.copy(running = false, status = "Failed: no bind-mode session (${_ui.value.state})") }
@@ -290,7 +363,17 @@ class GlassesViewModel(app: Application) : AndroidViewModel(app) {
 
     fun cancelBind() { binder?.cancel(); disconnect(); bindUpdate { it.copy(running = false, status = "Cancelled") } }
 
+    /** User disconnect: stops auto-reconnect and the foreground service. */
     fun disconnect() {
+        setKeepConnected(false)
+        reconnectJob?.cancel()
+        closeLink()
+        GlassesService.stop(app)
+    }
+
+    /** Closes the current link without changing [keepConnected]. */
+    private fun closeLink() {
+        generation.incrementAndGet()
         synchronized(thumbQueue) { thumbQueue.clear(); thumbCurrent = null }
         _ui.update { it.copy(downloading = null, thumbQueue = 0) }
         session?.close(); session = null
@@ -317,7 +400,7 @@ class GlassesViewModel(app: Application) : AndroidViewModel(app) {
         val setting = _ui.value.settings ?: return
         log("Writing ${group.title} settings")
         s.send(GlassesSettings.write(group, setting))
-        viewModelScope.launch { kotlinx.coroutines.delay(800); readSettings() }
+        scope.launch { kotlinx.coroutines.delay(800); readSettings() }
     }
 
     private fun handlePacket(packet: ByteArray) {
@@ -352,7 +435,7 @@ class GlassesViewModel(app: Application) : AndroidViewModel(app) {
         else if (thumbCurrent != null) nextThumbnail()
     }
 
-    private val thumbDir get() = java.io.File(getApplication<Application>().getExternalFilesDir(null), "thumbnails").apply { mkdirs() }
+    private val thumbDir get() = java.io.File(app.getExternalFilesDir(null), "thumbnails").apply { mkdirs() }
     private val mass = MassFileReceiver()
     private val thumbQueue = ArrayDeque<String>()
     private var thumbCurrent: String? = null
@@ -400,7 +483,7 @@ class GlassesViewModel(app: Application) : AndroidViewModel(app) {
         nextThumbnail()
     }
 
-    private val voiceDir get() = java.io.File(getApplication<Application>().getExternalFilesDir(null), "voice").apply { mkdirs() }
+    private val voiceDir get() = java.io.File(app.getExternalFilesDir(null), "voice").apply { mkdirs() }
     private var voiceRaw: java.io.FileOutputStream? = null
     private var voicePayload: java.io.FileOutputStream? = null
     private var voicePackets = 0
@@ -437,7 +520,7 @@ class GlassesViewModel(app: Application) : AndroidViewModel(app) {
         if (cmd == 3 || cmd == 4) closeVoiceCapture()
     }
 
-    private val aiImageDir get() = java.io.File(getApplication<Application>().getExternalFilesDir(null), "ai-images").apply { mkdirs() }
+    private val aiImageDir get() = java.io.File(app.getExternalFilesDir(null), "ai-images").apply { mkdirs() }
     private var aiImage: java.io.ByteArrayOutputStream? = null
     private var aiImageType = 0
     private var aiImageTotal = 0
@@ -484,7 +567,7 @@ class GlassesViewModel(app: Application) : AndroidViewModel(app) {
         voiceRaw = null; voicePayload = null
     }
 
-    private val gallery by lazy { GallerySaver(getApplication()) }
+    private val gallery by lazy { GallerySaver(app) }
     @Volatile private var p2pResult: kotlinx.coroutines.CompletableDeferred<GlassesEvents.P2pResult>? = null
 
     private fun syncStatus(text: String) { log("Sync: $text"); _ui.update { it.copy(syncStatus = text) } }
@@ -498,8 +581,8 @@ class GlassesViewModel(app: Application) : AndroidViewModel(app) {
         val s = session ?: return log("Not connected")
         if (Build.VERSION.SDK_INT < 29) return syncStatus("Needs Android 10+")
         _ui.update { it.copy(syncing = true) }
-        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-            val sync = runCatching { MediaSync(getApplication()) }.getOrElse { syncStatus("Wi-Fi Direct unavailable: ${it.message}"); _ui.update { u -> u.copy(syncing = false) }; return@launch }
+        scope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            val sync = runCatching { MediaSync(app) }.getOrElse { syncStatus("Wi-Fi Direct unavailable: ${it.message}"); _ui.update { u -> u.copy(syncing = false) }; return@launch }
             try {
                 syncStatus("Creating Wi-Fi Direct group…")
                 val group = sync.createGroup()
@@ -530,7 +613,7 @@ class GlassesViewModel(app: Application) : AndroidViewModel(app) {
                 todo.forEachIndexed { i, (entry, f) ->
                     val name = names.getValue(f)
                     syncStatus("Downloading ${i + 1}/${todo.size}: $name")
-                    val tmp = java.io.File(getApplication<Application>().cacheDir, "dl_$name")
+                    val tmp = java.io.File(app.cacheDir, "dl_$name")
                     var last = 0L
                     try {
                         MediaSync.download(result.ip, f, tmp) { n ->
@@ -555,5 +638,10 @@ class GlassesViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    override fun onCleared() { disconnect(); ai.close() }
+    companion object {
+        @Volatile private var instance: GlassesController? = null
+        fun get(context: Context): GlassesController = instance ?: synchronized(this) {
+            instance ?: GlassesController(context.applicationContext as Application).also { instance = it }
+        }
+    }
 }
