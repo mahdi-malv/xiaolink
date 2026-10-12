@@ -61,7 +61,7 @@ object GlassesCommands {
     /**
      * InstructionList with one resultType 3 (STOP_CAPTURE), as MiWearModuleImpl.sendAivsInstruction → SyncInstructionList.
      * AivsInstruction.writeTo (AivsProtos.java:1876, 1918) always writes f1 resultType and f13 sessionId (0); without
-     * f13 the glasses ignored the stop (device log). Untested with f13.
+     * f13 the glasses ignored the stop; with it the mic stream ends at once (device-verified).
      */
     fun aivsStopCapture(): ByteArray = aivs(0, Proto.encode { message(1) { message(1) { uint(1, 3); uint(13, 0) } } })
     /** Phone-initiated wake-up (OpenDevice): WakeUpEvent cmd 5 with a fresh request id. */
