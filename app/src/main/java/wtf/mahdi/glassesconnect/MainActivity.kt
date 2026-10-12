@@ -119,6 +119,25 @@ private fun ConnectTab(ui: UiState, vm: GlassesViewModel, requestPermissions: ()
             OutlinedButton(onClick = vm::disconnect) { Text("Disconnect") }
         }
         if (ui.connecting) LinearProgressIndicator(Modifier.fillMaxWidth())
+        BindSection(ui, vm)
+    }
+}
+
+@Composable
+private fun BindSection(ui: UiState, vm: GlassesViewModel) {
+    OutlinedCard(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Fresh bind (untested)", style = MaterialTheme.typography.titleSmall)
+            Text("Binds unbound (reset) glasses to the signed-in Xiaomi account, then fetches the new key and connects. " +
+                "Needs: cloud sign-in above and the glasses MAC.", style = MaterialTheme.typography.bodySmall)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = vm::bind, enabled = !ui.bind.running && ui.cloud.signedIn && ui.address.isNotBlank()) { Text("Bind") }
+                OutlinedButton(onClick = vm::cancelBind, enabled = ui.bind.running) { Text("Cancel") }
+            }
+            if (ui.bind.running) LinearProgressIndicator(Modifier.fillMaxWidth())
+            ui.bind.oob?.let { Text("Pairing code: $it", style = MaterialTheme.typography.titleMedium) }
+            if (ui.bind.status.isNotEmpty()) Text(ui.bind.status, style = MaterialTheme.typography.bodySmall)
+        }
     }
 }
 

@@ -29,6 +29,6 @@ object Roadmap {
         Item("Pass photo to Gemini", Status.Todo, "Default (XiaoAi) assistant auto-captures a photo and sends it to the AI; Gemini path does not. Capture photo + send image to Gemini Live."),
         Item("Live streaming (Interconnection 23/46)", Status.Todo, "Needs RTMP URL + Wi-Fi setup."),
         Item("Firmware update (OTA)", Status.Todo, "Out of scope; risky."),
-        Item("Fresh bind without official app", Status.Todo, "Bind needs Xiaomi server signatures (/glasses/bind/*); keep existing CN bind."),
+        Item("Fresh bind without official app", Status.Done, "PSK bind: glasses <-> /glasses/bind/hello|ecdh|bind relay (WearBind + GlassesBinder). Glasses must be unbound first."),
     )
 }

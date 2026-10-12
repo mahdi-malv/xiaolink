@@ -51,7 +51,11 @@ data class UiState(
     /** Group fields with unsent edits. */
     val settingsDirty: Set<Int> = emptySet(),
     val cloud: CloudState = CloudState(),
+    val bind: BindState = BindState(),
 )
+
+/** Fresh bind progress. [oob] is the pairing code when the glasses use oobMode 1. */
+data class BindState(val running: Boolean = false, val status: String = "", val oob: String? = null)
 
 /** Xiaomi cloud key fetch. [needsCode] is non-null while 2FA waits for a code. */
 data class CloudState(
@@ -61,6 +65,7 @@ data class CloudState(
     val needsCode: XiaomiCloud.LoginResult.NeedsCode? = null,
     val codeSent: Boolean = false,
     val devices: List<XiaomiCloud.Device> = emptyList(),
+    val signedIn: Boolean = false,
 )
 
 @SuppressLint("MissingPermission")
@@ -73,6 +78,8 @@ class GlassesViewModel(app: Application) : AndroidViewModel(app) {
         cloud = CloudState(user = prefs.getString("cloud_user", "").orEmpty()),
     ))
     private val cloud = XiaomiCloud(prefs)
+    @Volatile private var cloudAuth: XiaomiCloud.Auth? = null
+    @Volatile private var binder: wtf.mahdi.glassesconnect.cloud.GlassesBinder? = null
     val ui: StateFlow<UiState> = _ui.asStateFlow()
     var autoThumbnails = true
     init {
@@ -146,13 +153,16 @@ class GlassesViewModel(app: Application) : AndroidViewModel(app) {
         cloudDevices(auth)
     }
 
-    fun cloudLogout() { cloud.logout(); cloudUpdate { CloudState(user = it.user, status = "Signed out") } }
+    fun cloudLogout() { cloud.logout(); cloudAuth = null; cloudUpdate { CloudState(user = it.user, status = "Signed out") } }
 
     private fun cloudDevices(auth: XiaomiCloud.Auth) {
+        cloudAuth = auth
+        cloudUpdate { it.copy(signedIn = true) }
         cloudUpdate { it.copy(status = "Signed in as ${auth.userId}. Loading devices…") }
         val devices = cloud.devices(auth)
         log("Cloud: ${devices.size} device(s): " + devices.joinToString { "${it.model} ${it.mac}" })
-        cloudUpdate { it.copy(devices = devices, status = "Signed in as ${auth.userId}. Tap a device to use its key.") }
+        cloudUpdate { it.copy(devices = devices, status = "Signed in as ${auth.userId}. " +
+            if (devices.isEmpty()) "No glasses bound to this account (use Fresh bind below)." else "Tap a device to use its key.") }
     }
 
     /** Uses a cloud device's key and MAC for the next connect. */
@@ -166,12 +176,20 @@ class GlassesViewModel(app: Application) : AndroidViewModel(app) {
         val s = _ui.value
         val token = s.token.replace(" ", "")
         if (!Regex("[0-9a-fA-F]+").matches(token) || token.length % 2 != 0) return log("Token must be the hex encrypt_key")
+        val tokenBytes = token.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+        open(s.address, tokenBytes)
+    }
+
+    /**
+     * Opens RFCOMM and a session. [token] null = bind mode: [onUnauth] runs (on a new thread) once L1 is up,
+     * and plain packets go to [onPlain].
+     */
+    private fun open(address: String, token: ByteArray?, onUnauth: ((WearSession) -> Unit)? = null, onPlain: ((ByteArray) -> Unit)? = null) {
         val adapter = getApplication<Application>().getSystemService(BluetoothManager::class.java)?.adapter
             ?: return log("No Bluetooth adapter")
-        val device = runCatching { adapter.getRemoteDevice(s.address) }.getOrElse { return log("Bad MAC address") }
+        val device = runCatching { adapter.getRemoteDevice(address) }.getOrElse { return log("Bad MAC address") }
         disconnect()
         _ui.update { it.copy(connecting = true, state = "Connecting RFCOMM…") }
-        val tokenBytes = token.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
         Thread({
             lateinit var newSession: WearSession
             val newLink = SppLink(device,
@@ -179,31 +197,98 @@ class GlassesViewModel(app: Application) : AndroidViewModel(app) {
                 onClosed = { e ->
                     log("Socket closed${e?.let { ": ${it.message}" } ?: ""}")
                     _ui.update { it.copy(ready = false, connecting = false, state = "Disconnected") }
+                    binder?.cancel()
                 })
-            newSession = WearSession(tokenBytes, Build.MODEL ?: "Android", Build.VERSION.SDK_INT,
+            newSession = WearSession(token, Build.MODEL ?: "Android", Build.VERSION.SDK_INT,
                 write = { runCatching { newLink.write(it) }.onFailure { e -> log("Write failed: ${e.message}") } },
                 listener = object : WearSession.Listener {
-                    override fun onState(state: WearSession.State, detail: String) = _ui.update {
-                        it.copy(state = "$state: $detail", ready = state == WearSession.State.Ready,
-                            connecting = state == WearSession.State.Negotiating || state == WearSession.State.Authenticating)
+                    override fun onState(state: WearSession.State, detail: String) {
+                        _ui.update {
+                            it.copy(state = "$state: $detail", ready = state == WearSession.State.Ready,
+                                connecting = state == WearSession.State.Negotiating || state == WearSession.State.Authenticating)
+                        }
+                        if (state == WearSession.State.Unauthenticated && onUnauth != null) Thread({ onUnauth(newSession) }, "bind").start()
+                        if (state == WearSession.State.Failed) binder?.cancel()
                     }
                     override fun onLog(line: String) = log(line)
                     override fun onPacket(packet: ByteArray, response: Boolean) = handlePacket(packet)
                     override fun onMass(data: ByteArray) = handleMass(data)
                     override fun onVoice(data: ByteArray) = handleVoice(data)
+                    override fun onPlain(packet: ByteArray) { onPlain?.invoke(packet) }
                 })
             try {
+                log("RFCOMM connecting to $address (bond state ${device.bondState}, name ${device.name})")
                 newLink.open()
                 link = newLink; session = newSession
-                log("RFCOMM connected to ${s.address}")
+                log("RFCOMM connected to $address")
                 newSession.start()
             } catch (e: Exception) {
                 newLink.close(); newSession.close()
                 log("Connect failed: ${e.message}")
                 _ui.update { it.copy(connecting = false, state = "Connect failed") }
+                binder?.cancel()
             }
         }, "spp-connect").start()
     }
+
+    private fun bindUpdate(f: (BindState) -> BindState) = _ui.update { it.copy(bind = f(it.bind)) }
+
+    /**
+     * Fresh bind (UNTESTED): glasses must be unbound (reset). Needs cloud sign-in and the glasses MAC.
+     * On success fetches the new encrypt_key from the cloud and connects normally.
+     */
+    @SuppressLint("HardwareIds")
+    fun bind() {
+        val auth = cloudAuth ?: return bindUpdate { it.copy(status = "Sign in to Xiaomi cloud first") }
+        val address = _ui.value.address
+        if (address.isBlank()) return bindUpdate { it.copy(status = "Select the glasses MAC first") }
+        if (_ui.value.bind.running) return
+        val app = getApplication<Application>()
+        val btName = runCatching { app.getSystemService(BluetoothManager::class.java)?.adapter?.getRemoteDevice(address)?.name }.getOrNull()
+        val phoneId = android.provider.Settings.Secure.getString(app.contentResolver, android.provider.Settings.Secure.ANDROID_ID).orEmpty()
+        val loc = Locale.getDefault()
+        val locale = if (loc.country.isEmpty()) loc.language.lowercase() else "${loc.language.lowercase()}_${loc.country.lowercase()}"
+        bindUpdate { BindState(running = true, status = "Connecting in bind mode…") }
+        log("Bind: start for $address")
+        open(address, null,
+            onUnauth = { s ->
+                val b = wtf.mahdi.glassesconnect.cloud.GlassesBinder(cloud, auth, s, address, btName ?: "Xiaomi AI Glasses",
+                    phoneId, locale, Build.MODEL ?: "Android", Build.VERSION.SDK_INT, log = { line -> log(line); bindUpdate { it.copy(status = line.removePrefix("Bind: ")) } },
+                    onOob = { code -> bindUpdate { it.copy(oob = code) } })
+                binder = b
+                try {
+                    val result = b.run()
+                    bindUpdate { it.copy(status = "Bound (did ${result.did}). Fetching key…") }
+                    disconnect()
+                    val devices = cloud.devices(auth)
+                    log("Cloud: ${devices.size} device(s) after bind: " + devices.joinToString { "${it.model} ${it.mac} did=${it.did}" })
+                    cloudUpdate { it.copy(devices = devices) }
+                    val device = devices.firstOrNull { it.did == result.did } ?: devices.firstOrNull { it.mac.equals(address, true) }
+                    if (device == null || device.encryptKey.isEmpty()) {
+                        bindUpdate { it.copy(running = false, status = "Bound, but no key in device list yet. Fetch key again later.") }
+                    } else {
+                        useCloudDevice(device)
+                        bindUpdate { it.copy(running = false, oob = null, status = "Bound. Connecting with the new key…") }
+                        connect()
+                    }
+                } catch (e: Exception) {
+                    log("Bind failed: ${e.message}")
+                    bindUpdate { it.copy(running = false, status = "Failed: ${e.message}") }
+                    Thread.sleep(500) // let a queued error report reach the glasses
+                    disconnect()
+                } finally { binder = null }
+            },
+            onPlain = { packet -> binder?.onPlain(packet) ?: log("Plain packet before binder ready: ${Proto.hex(packet)}") })
+        // The bind thread may never start (RFCOMM or L1 failure); clear running so the button comes back.
+        viewModelScope.launch {
+            kotlinx.coroutines.delay(35_000)
+            if (binder == null && _ui.value.bind.running && _ui.value.state.let { !it.startsWith("Unauthenticated") }) {
+                bindUpdate { it.copy(running = false, status = "Failed: no bind-mode session (${_ui.value.state})") }
+            }
+        }
+    }
+
+    fun cancelBind() { binder?.cancel(); disconnect(); bindUpdate { it.copy(running = false, status = "Cancelled") } }
 
     fun disconnect() {
         synchronized(thumbQueue) { thumbQueue.clear(); thumbCurrent = null }

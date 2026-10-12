@@ -23,6 +23,7 @@ import java.util.concurrent.TimeUnit
  *   sid "health-glasses"                     library/base/basecommon/config/d.java:96
  *   host https://hlth.io.mi.com (CN)         library/base/basecommon/config/c.java:74
  *   POST /glasses/source/get_source_list     MiWearBindService.java:67
+ *   POST /glasses/bind/hello|ecdh|bind       MiWearBindService.java (fresh bind, see [bindHello])
  *   RC4 signing                              com/xiaomi/common/crypt/CloudUtil.java
  *   cookies                                  AddMiWearCookiesInterceptor.java:45-91
  */
@@ -99,30 +100,78 @@ class XiaomiCloud(private val prefs: SharedPreferences) {
 
     /** Lists glasses bound to the account, with their encrypt_key. */
     fun devices(auth: Auth): List<Device> {
-        val nonceRaw = ByteArray(8).also(random::nextBytes) +
-            (System.currentTimeMillis() / 60000).toInt().let { byteArrayOf((it shr 24).toByte(), (it shr 16).toByte(), (it shr 8).toByte(), it.toByte()) }
-        val signedNonce = sha256(b64d(auth.ssecurity) + nonceRaw)
-        val params = sortedMapOf("data" to """{"model":"","page_size":100,"status":1}""")
-        params["rc4_hash__"] = b64(sha1Sig("POST", PATH, params, b64(signedNonce)))
-        val rc4 = Rc4(signedNonce)
-        val enc = params.mapValuesTo(sortedMapOf()) { (_, v) -> b64(rc4.crypt(v.toByteArray())) }
-        enc["signature"] = b64(sha1Sig("POST", PATH, enc, b64(signedNonce)))
-        enc["_nonce"] = b64(nonceRaw)
-        val form = FormBody.Builder().apply { enc.forEach { (k, v) -> add(k, v) } }.build()
-        val cookies = "serviceToken=${auth.serviceToken}; userId=${auth.userId}; cUserId=${auth.cUserId}; auth_key=$AUTH_KEY; locale=zh_CN"
-        val request = Request.Builder().url(HOST + PATH).post(form).header("Cookie", cookies).build()
-        // Cookies are set by hand here, like the official app; keep the account jar out of it.
-        val (status, body) = client.newBuilder().cookieJar(CookieJar.NO_COOKIES).build().newCall(request).execute()
-            .use { it.code to it.body?.string().orEmpty() }
-        val res = runCatching { JSONObject(String(Rc4(signedNonce).crypt(b64d(body)))) }
-            .getOrElse { throw CloudException("HTTP $status, cannot decrypt response: ${body.take(300)}") }
-        val list = (res.optJSONObject("result") ?: res.optJSONObject("data"))?.optJSONArray("list")
-            ?: throw CloudException("No devices. Raw response: ${res.toString().take(800)}")
+        val res = call(auth, PATH, """{"model":"","page_size":100,"status":1}""")
+        if (res.optInt("code", 0) != 0) throw CloudException("Device list failed: ${res.toString().take(800)}")
+        // "list": null = no glasses bound to this account (e.g. after unbind).
+        val list = (res.optJSONObject("result") ?: res.optJSONObject("data"))?.optJSONArray("list") ?: return emptyList()
         return (0 until list.length()).map { i ->
             val d = list.getJSONObject(i)
             val detail = d.optJSONObject("detail") ?: JSONObject()
             Device(d.optString("model"), d.optString("name"), d.optString("sid"), detail.optString("mac"), detail.optString("encrypt_key"))
         }
+    }
+
+    /**
+     * Bind step 1 (/glasses/bind/hello, BindHelloInfo). Returns ApplyBindInfo: bind_index, bind_did, pub_s, sign_s, random_s.
+     * Values as MiWearBindDataRepository.applyBind / PSKWearBinderV2.applyBind: mac = randomMac = BT address,
+     * phone_id = Settings.Secure.ANDROID_ID, node_id "", random_d = base64(deviceRandom, URL_SAFE|NO_WRAP).
+     */
+    fun bindHello(auth: Auth, mode: Int, model: String, mac: String, phoneId: String, sn: String, did: String, deviceRandom: ByteArray): JSONObject {
+        val data = JSONObject().put("mode", mode).put("model", model).put("mac", mac).put("randomMac", mac)
+            .put("phone_id", phoneId).put("node_id", "").put("sn", sn).put("did", did).put("random_d", b64url(deviceRandom))
+        return result(call(auth, "/glasses/bind/hello", data.toString()), "bind/hello")
+    }
+
+    /** Bind step 2 (/glasses/bind/ecdh, BindECDHInfo). Returns VerifyBindInfo: device_key, bind_key, oob_code. */
+    fun bindEcdh(auth: Auth, bindIndex: String, bindDid: String, devicePublicKey: ByteArray, deviceSign: ByteArray): JSONObject {
+        val data = JSONObject().put("bind_index", bindIndex).put("bind_did", bindDid)
+            .put("pub_d", b64url(devicePublicKey)).put("sign_d", b64url(deviceSign))
+        return result(call(auth, "/glasses/bind/ecdh", data.toString()), "bind/ecdh")
+    }
+
+    /** Bind step 3 (/glasses/bind/bind?locale=, ConfirmBindInfo). Returns BindResult {ret}; ret 1 = success. */
+    fun bindConfirm(auth: Auth, locale: String, bindIndex: String, bindDid: String, bindSign: ByteArray, name: String): JSONObject {
+        val data = JSONObject().put("bind_index", bindIndex).put("bind_did", bindDid).put("bind_sign", b64url(bindSign))
+            .put("extra_values", JSONObject().put("name", name))
+        return result(call(auth, "/glasses/bind/bind", data.toString(), "locale" to locale), "bind/bind")
+    }
+
+    /** Last raw decrypted response, for the log. */
+    @Volatile var lastResponse: String = ""
+        private set
+
+    /**
+     * Signed POST with form field data=[data] (CloudInterceptor.handlePostParams: only form fields are signed and
+     * RC4-encrypted; query parameters stay as they are). Returns the decrypted RestResult JSON {code, message, result}.
+     */
+    private fun call(auth: Auth, path: String, data: String, query: Pair<String, String>? = null): JSONObject {
+        val nonceRaw = ByteArray(8).also(random::nextBytes) +
+            (System.currentTimeMillis() / 60000).toInt().let { byteArrayOf((it shr 24).toByte(), (it shr 16).toByte(), (it shr 8).toByte(), it.toByte()) }
+        val signedNonce = sha256(b64d(auth.ssecurity) + nonceRaw)
+        val params = sortedMapOf("data" to data)
+        params["rc4_hash__"] = b64(sha1Sig("POST", path, params, b64(signedNonce)))
+        val rc4 = Rc4(signedNonce)
+        val enc = params.mapValuesTo(sortedMapOf()) { (_, v) -> b64(rc4.crypt(v.toByteArray())) }
+        enc["signature"] = b64(sha1Sig("POST", path, enc, b64(signedNonce)))
+        enc["_nonce"] = b64(nonceRaw)
+        val form = FormBody.Builder().apply { enc.forEach { (k, v) -> add(k, v) } }.build()
+        val cookies = "serviceToken=${auth.serviceToken}; userId=${auth.userId}; cUserId=${auth.cUserId}; auth_key=$AUTH_KEY; locale=zh_CN"
+        val url = (HOST + path).toHttpUrl().newBuilder().apply { query?.let { addQueryParameter(it.first, it.second) } }.build()
+        val request = Request.Builder().url(url).post(form).header("Cookie", cookies).build()
+        // Cookies are set by hand here, like the official app; keep the account jar out of it.
+        val (status, body) = client.newBuilder().cookieJar(CookieJar.NO_COOKIES).build().newCall(request).execute()
+            .use { it.code to it.body?.string().orEmpty() }
+        val res = runCatching { JSONObject(String(Rc4(signedNonce).crypt(b64d(body)))) }
+            .getOrElse { lastResponse = "HTTP $status $body"; throw CloudException("$path: HTTP $status, cannot decrypt response: ${body.take(300)}") }
+        lastResponse = "$path HTTP $status $res"
+        return res
+    }
+
+    private fun result(res: JSONObject, step: String): JSONObject {
+        val code = res.optInt("code", 0)
+        val result = res.optJSONObject("result") ?: res.optJSONObject("data")
+        if (code != 0 || result == null) throw CloudException("$step failed: code $code ${res.optString("message")} ${res.toString().take(500)}")
+        return result
     }
 
     /** Forgets the saved passToken session. */
@@ -243,6 +292,10 @@ class XiaomiCloud(private val prefs: SharedPreferences) {
         private fun sha256(b: ByteArray) = MessageDigest.getInstance("SHA-256").digest(b)
         private fun ByteArray.hex() = joinToString("") { "%02x".format(it) }
         private fun b64(b: ByteArray) = Base64.encodeToString(b, Base64.NO_WRAP)
+        /** WearBinderV2.BASE64_FLAG = 10 = URL_SAFE | NO_WRAP (padding kept). */
+        fun b64url(b: ByteArray): String = Base64.encodeToString(b, Base64.URL_SAFE or Base64.NO_WRAP)
+        /** Decodes server base64 in either alphabet. */
+        fun b64urlDecode(s: String): ByteArray = Base64.decode(s.replace('+', '-').replace('/', '_'), Base64.URL_SAFE)
         private fun b64d(s: String) = Base64.decode(s, Base64.DEFAULT)
     }
 }

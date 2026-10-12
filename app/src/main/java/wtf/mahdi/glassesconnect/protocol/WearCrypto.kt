@@ -39,20 +39,31 @@ object WearCrypto {
         return keys
     }
 
-    // CCM with 12-byte nonce, no associated data, and 4-byte tag, as used by the APK.
-    fun ccmEncrypt(key: ByteArray, nonce: ByteArray, plaintext: ByteArray): ByteArray {
-        require(nonce.size == 12 && plaintext.size <= 0xffffff)
+    /**
+     * AES-CCM with a 4-byte tag, as used by the APK (SecurityUtil.AESEncryptWithAuth, BouncyCastle CCMBlockCipher, mac 32 bits).
+     * Auth uses a 12-byte nonce and no associated data; bind (BindResultV2) adds [aad] "bind-data".
+     */
+    fun ccmEncrypt(key: ByteArray, nonce: ByteArray, plaintext: ByteArray, aad: ByteArray = byteArrayOf()): ByteArray {
+        require(nonce.size in 7..13 && aad.size < 0xff00)
+        val q = 15 - nonce.size
+        require(q >= 4 || plaintext.size < (1 shl (8 * q)))
         val cipher = Cipher.getInstance("AES/ECB/NoPadding").apply {
             init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"))
         }
         fun block(bytes: ByteArray) = cipher.doFinal(bytes)
-        val first = byteArrayOf(0x0a) + nonce + length3(plaintext.size)
-        var mac = block(first)
-        plaintext.asList().chunked(16).forEach { chunk ->
-            val padded = chunk.toByteArray().copyOf(16)
-            mac = block(ByteArray(16) { (mac[it].toInt() xor padded[it].toInt()).toByte() })
+        fun absorb(mac: ByteArray, data: ByteArray): ByteArray {
+            var m = mac
+            data.asList().chunked(16).forEach { chunk ->
+                val padded = chunk.toByteArray().copyOf(16)
+                m = block(ByteArray(16) { (m[it].toInt() xor padded[it].toInt()).toByte() })
+            }
+            return m
         }
-        fun stream(index: Int) = block(byteArrayOf(2) + nonce + length3(index))
+        val flags = (if (aad.isNotEmpty()) 0x40 else 0) or (((4 - 2) / 2) shl 3) or (q - 1)
+        var mac = block(byteArrayOf(flags.toByte()) + nonce + lengthBytes(plaintext.size, q))
+        if (aad.isNotEmpty()) mac = absorb(mac, lengthBytes(aad.size, 2) + aad)
+        mac = absorb(mac, plaintext)
+        fun stream(index: Int) = block(byteArrayOf((q - 1).toByte()) + nonce + lengthBytes(index, q))
         val ciphertext = ByteArray(plaintext.size)
         for (offset in plaintext.indices step 16) {
             val s = stream(offset / 16 + 1)
@@ -64,18 +75,19 @@ object WearCrypto {
         return ciphertext + ByteArray(4) { (mac[it].toInt() xor zero[it].toInt()).toByte() }
     }
 
-    fun ccmDecrypt(key: ByteArray, nonce: ByteArray, ciphertext: ByteArray): ByteArray {
-        require(nonce.size == 12 && ciphertext.size >= 4)
+    fun ccmDecrypt(key: ByteArray, nonce: ByteArray, ciphertext: ByteArray, aad: ByteArray = byteArrayOf()): ByteArray {
+        require(nonce.size in 7..13 && ciphertext.size >= 4)
+        val q = 15 - nonce.size
         val cipher = Cipher.getInstance("AES/ECB/NoPadding").apply {
             init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"))
         }
         val plain = ByteArray(ciphertext.size - 4)
         for (offset in plain.indices step 16) {
-            val stream = cipher.doFinal(byteArrayOf(2) + nonce + length3(offset / 16 + 1))
+            val stream = cipher.doFinal(byteArrayOf((q - 1).toByte()) + nonce + lengthBytes(offset / 16 + 1, q))
             for (i in 0 until minOf(16, plain.size-offset))
                 plain[offset+i] = (ciphertext[offset+i].toInt() xor stream[i].toInt()).toByte()
         }
-        val expected = ccmEncrypt(key, nonce, plain)
+        val expected = ccmEncrypt(key, nonce, plain, aad)
         require(MessageDigest.isEqual(expected, ciphertext)) { "Authentication tag mismatch" }
         return plain
     }
@@ -85,5 +97,6 @@ object WearCrypto {
         init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(key)); doFinal(data)
     }
 
-    private fun length3(value: Int) = byteArrayOf((value ushr 16).toByte(), (value ushr 8).toByte(), value.toByte())
+    /** Big-endian [value] in [size] bytes. */
+    private fun lengthBytes(value: Int, size: Int) = ByteArray(size) { (value.toLong() ushr (8 * (size - 1 - it))).toByte() }
 }
