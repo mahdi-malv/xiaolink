@@ -122,6 +122,19 @@ private fun ConnectTab(ui: UiState, vm: GlassesController, requestPermissions: (
         if (ui.connecting) LinearProgressIndicator(Modifier.fillMaxWidth())
         BackgroundSection(ui, vm)
         BindSection(ui, vm)
+        GeminiSection(ui, vm)
+    }
+}
+
+@Composable
+private fun GeminiSection(ui: UiState, vm: GlassesController) {
+    OutlinedCard(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Gemini (AI assistant)", style = MaterialTheme.typography.titleSmall)
+            Text("API key from aistudio.google.com. Stored on this phone only; sent only to Google.", style = MaterialTheme.typography.bodySmall)
+            OutlinedTextField(ui.geminiKey, vm::setGeminiKey, label = { Text("Gemini API key") }, singleLine = true,
+                visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth())
+        }
     }
 }
 

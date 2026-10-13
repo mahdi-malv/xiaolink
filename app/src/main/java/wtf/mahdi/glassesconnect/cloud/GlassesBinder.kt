@@ -64,7 +64,7 @@ class GlassesBinder(
         val deviceKey = b64(ecdh, "device_key")
         val bindKey = ecdh.optString("bind_key").toByteArray() // PSKWearBinderV2: getBindKey().getBytes(), not base64-decoded
         val oob = "%06d".format(ecdh.optInt("oob_code"))
-        log("Bind: ecdh device_key=${hex(deviceKey)} bind_key=${ecdh.optString("bind_key")} oob=$oob")
+        log("Bind: ecdh device_key=${masked(hex(deviceKey))} bind_key=${masked(ecdh.optString("bind_key"))} oob=$oob")
         if (info.oobMode == 1) { log("Bind: oobMode 1, pairing code $oob (confirm on the glasses if asked)"); onOob(oob) }
         val confirm = WearBind.parseDeviceConfirm(exchange("AppConfirm", WearBind.appConfirm(deviceKey, oob, bindKey), 60))
         log("Bind: DeviceConfirm deviceRandom=${hex(confirm.deviceRandom)} sign=${hex(confirm.deviceSign)} bindSign=${hex(confirm.bindSign)}")
@@ -115,4 +115,6 @@ class GlassesBinder(
         o.optString(key).takeIf { it.isNotEmpty() }?.let(XiaomiCloud::b64urlDecode) ?: error("Server reply has no $key: $o")
 
     private fun hex(b: ByteArray) = Proto.hex(b).replace(" ", "")
+    /** Keeps secrets out of log.txt (users attach it to bug reports): first 4 chars and the length only. */
+    private fun masked(s: String) = if (s.isEmpty()) "(none)" else "${s.take(4)}…(${s.length})"
 }

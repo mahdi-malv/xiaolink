@@ -3,7 +3,6 @@ package wtf.mahdi.glassesconnect.ai
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
-import com.xiaoai.sbc_decoder.SBCDecoder
 import org.json.JSONObject
 import wtf.mahdi.glassesconnect.protocol.GlassesCommands
 import java.util.concurrent.Executors
@@ -23,7 +22,8 @@ import java.util.concurrent.TimeUnit
  * must not end our turn (answer audio follows).
  */
 class AiAssistant(
-    private val apiKey: String,
+    /** Gemini API key; read on each session start so a changed key applies without a restart. */
+    private val apiKey: () -> String,
     private val model: String,
     private val visionModel: String,
     private val sendToGlasses: (ByteArray) -> Unit,
@@ -33,10 +33,10 @@ class AiAssistant(
     private enum class Phase { Idle, Listening, Thinking, Speaking }
 
     private val worker = Executors.newSingleThreadScheduledExecutor { Thread(it, "ai") }
-    private val vision = GeminiVision(apiKey, visionModel)
+    private val vision = GeminiVision(visionModel)
     private val visionWorker = Executors.newSingleThreadExecutor { Thread(it, "ai-vision") }
     private val player = Executors.newSingleThreadExecutor { Thread(it, "ai-audio") }
-    private val decoder by lazy { SBCDecoder() }
+    private val decoder = MsbcDecoder()
     private var gemini: GeminiLive? = null
     private var phase = Phase.Idle
     private var idleClose: ScheduledFuture<*>? = null
@@ -50,7 +50,7 @@ class AiAssistant(
     /** Tool response sent; waiting for the answer audio. */
     private var awaitingAnswer = false
 
-    val configured get() = apiKey.isNotBlank()
+    val configured get() = apiKey().isNotBlank()
 
     /** Glasses reported a wake-up (gesture or wake word): they are already streaming the microphone. */
     fun onWake(cmd: Int) = worker.execute { startListening("glasses wake cmd=$cmd") }
@@ -75,10 +75,8 @@ class AiAssistant(
         if (type != 1 && type != 2) return
         worker.execute {
             if (phase != Phase.Listening) return@execute
-            val sbc = data.copyOfRange(12, data.size)
-            val pcm = ByteArray(sbc.size * 6)
-            val n = runCatching { decoder.decodeSBC(sbc, sbc.size, pcm) }.getOrElse { log("AI: SBC decode failed: ${it.message}"); 0 }
-            if (n > 0) gemini?.sendAudio(pcm.copyOf(n))
+            val pcm = decoder.decode(data.copyOfRange(12, data.size))
+            if (pcm.isNotEmpty()) gemini?.sendAudio(pcm)
         }
     }
 
@@ -90,7 +88,7 @@ class AiAssistant(
         log("AI: asking $visionModel about the photo (${jpeg.size} B): ${call.question}")
         val started = System.currentTimeMillis()
         visionWorker.execute {
-            val result = runCatching { vision.ask(jpeg, call.question) }
+            val result = runCatching { vision.ask(apiKey(), jpeg, call.question) }
             worker.execute {
                 val response = result.fold(
                     { log("AI vision (${System.currentTimeMillis() - started} ms): $it"); JSONObject().put("result", it) },
@@ -118,14 +116,14 @@ class AiAssistant(
     }
 
     private fun startListening(source: String): Boolean {
-        if (!configured) { log("AI: no Gemini key; set gemini.apiKey in local.properties and rebuild"); return false }
-        if (!SBCDecoder.available) { log("AI: libsbc not available on this ABI"); return false }
+        if (!configured) { log("AI: no Gemini API key; set it on the Connect tab"); return false }
         idleClose?.cancel(false)
         if (phase == Phase.Speaking) stopPlayback()
         heard.clear(); said.clear()
+        decoder.reset()
         if (gemini?.open != true) {
             log("AI: connecting to Gemini ($model)")
-            gemini = GeminiLive(apiKey, model, SYSTEM_PROMPT, callbacks).also { it.connect() }
+            gemini = GeminiLive(apiKey(), model, SYSTEM_PROMPT, callbacks).also { it.connect() }
         }
         log("AI: listening ($source)")
         setPhase(Phase.Listening)

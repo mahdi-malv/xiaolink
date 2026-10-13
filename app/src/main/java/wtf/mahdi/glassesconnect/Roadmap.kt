@@ -26,6 +26,7 @@ object Roadmap {
         Item("Button capture events (Media tab)", Status.Done, "Media 16 file report, 22 record status, 23 sync request; Interconnection 59 vlog, 60 glass event."),
         Item("Photo / video capture from phone", Status.Done, "MIoT action 2.3 take-photo / 2.1 toggle-record via SEND_MIS_PACKET (23/33). Needs empty 'in' arguments."),
         Item("AI assistant (AIVS) / voice", Status.Todo, "Xiaomi XiaoAi cloud; likely not usable outside China."),
+        Item("Kotlin mSBC decoder (replaces libsbc.so)", Status.Untested, "ai/MsbcDecoder; matches ffmpeg in unit tests. Confirm Gemini hears speech on device."),
         Item("Pass photo to Gemini", Status.Done, "Gemini Live take_photo(question) -> Aivs MultiModal cmd 1 -> 576x432 JPEG -> one-shot vision model (gemini.visionModel) -> text toolResponse. Live session holds no images."),
         Item("AI image capture (Aivs MultiModal)", Status.Done, "Aivs id4 MultiModal cmd 1 -> 576x432 JPEG (types 3/4) on voice channel; cmd 3 -> 960x720 original of last capture (types 9/11). Saved to files/ai-images."),
         Item("Live streaming (Interconnection 23/46)", Status.Todo, "Needs RTMP URL + Wi-Fi setup."),

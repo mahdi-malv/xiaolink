@@ -35,6 +35,8 @@ data class UiState(
     val paired: List<PairedDevice> = emptyList(),
     val address: String = "",
     val token: String = "",
+    /** Gemini API key (Google AI Studio). Default: gemini.apiKey from local.properties (dev builds). */
+    val geminiKey: String = "",
     val state: String = "Disconnected",
     val ready: Boolean = false,
     val connecting: Boolean = false,
@@ -85,6 +87,7 @@ class GlassesController private constructor(private val app: Application) {
     private val _ui = MutableStateFlow(UiState(
         address = prefs.getString("address", "").orEmpty(),
         token = prefs.getString("token", "").orEmpty(),
+        geminiKey = prefs.getString("gemini_key", null) ?: BuildConfig.GEMINI_API_KEY,
         cloud = CloudState(user = prefs.getString("cloud_user", "").orEmpty()),
     ))
     private val cloud = XiaomiCloud(prefs)
@@ -99,7 +102,7 @@ class GlassesController private constructor(private val app: Application) {
     private var link: SppLink? = null
     private var session: WearSession? = null
     private val time = SimpleDateFormat("HH:mm:ss", Locale.US)
-    private val ai = AiAssistant(BuildConfig.GEMINI_API_KEY, BuildConfig.GEMINI_MODEL, BuildConfig.GEMINI_VISION_MODEL,
+    private val ai = AiAssistant({ _ui.value.geminiKey }, BuildConfig.GEMINI_MODEL, BuildConfig.GEMINI_VISION_MODEL,
         sendToGlasses = { packet -> session?.send(packet) },
         log = ::log,
         onState = { st -> _ui.update { it.copy(aiState = st) }; aiWakeLock(st != "Idle") })
@@ -130,6 +133,7 @@ class GlassesController private constructor(private val app: Application) {
     }
 
     fun setAddress(value: String) { _ui.update { it.copy(address = value.trim().uppercase()) }; prefs.edit().putString("address", _ui.value.address).apply() }
+    fun setGeminiKey(value: String) { _ui.update { it.copy(geminiKey = value.trim()) }; prefs.edit().putString("gemini_key", _ui.value.geminiKey).apply() }
     fun setToken(value: String) { _ui.update { it.copy(token = value.trim()) }; prefs.edit().putString("token", _ui.value.token).apply() }
 
     private fun cloudUpdate(f: (CloudState) -> CloudState) = _ui.update { it.copy(cloud = f(it.cloud)) }

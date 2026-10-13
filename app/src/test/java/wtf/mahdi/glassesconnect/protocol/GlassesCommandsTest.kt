@@ -10,9 +10,9 @@ class GlassesCommandsTest {
         assertEquals("08 02 10 0e 22 06 92 02 03 08 f0 03", Proto.hex(GlassesCommands.settings()))
         assertEquals("08 12 10 14 a2 01 07 8a 01 04 08 00 10 00", Proto.hex(GlassesCommands.record(true)))
         assertEquals("08 12 10 14 a2 01 07 8a 01 04 08 00 10 01", Proto.hex(GlassesCommands.record(false)))
-        // Aivs=f16; AivsStatus f5 {voice, tts, media, image, operating, device}; InstructionList f1 {f1 {resultType f1}}.
+        // Aivs=f16; AivsStatus f5 {voice, tts, media, image, operating, device}; InstructionList f1 {f1 {resultType f1, sessionId f13}}.
         assertEquals("08 0e 10 05 82 01 0e 2a 0c 08 00 10 00 18 00 20 00 28 00 30 00", Proto.hex(GlassesCommands.aivsStatus(0)))
-        assertEquals("08 0e 10 00 82 01 06 0a 04 0a 02 08 03", Proto.hex(GlassesCommands.aivsStopCapture()))
+        assertEquals("08 0e 10 00 82 01 08 0a 06 0a 04 08 03 68 00", Proto.hex(GlassesCommands.aivsStopCapture()))
     }
     @Test fun batteryResponseAndUnsolicitedReport() {
         val battery = Proto.encode { uint(1, 73); uint(2, 0) }

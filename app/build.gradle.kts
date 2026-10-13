@@ -32,6 +32,8 @@ android {
 
     buildTypes {
         release {
+            // Never ship a developer's key: release users enter their own on the Connect tab.
+            buildConfigField("String", "GEMINI_API_KEY", "\"\"")
             optimization {
                 enable = true
                 packageScope = setOf("androidx.**", "kotlin.**", "kotlinx.**")
