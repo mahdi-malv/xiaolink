@@ -22,6 +22,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "GlassesConnect"
+rootProject.name = "XiaoLink"
 include(":app")
- 

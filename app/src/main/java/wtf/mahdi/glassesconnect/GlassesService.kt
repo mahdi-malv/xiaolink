@@ -100,7 +100,7 @@ class GlassesService : Service() {
         val stop = PendingIntent.getService(this, 1, Intent(this, GlassesService::class.java).setAction(ACTION_DISCONNECT), PendingIntent.FLAG_IMMUTABLE)
         return NotificationCompat.Builder(this, CHANNEL)
             .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
-            .setContentTitle("Glasses")
+            .setContentTitle(getString(R.string.app_name))
             .setContentText(text)
             .setContentIntent(open)
             .setOngoing(true)
