@@ -53,6 +53,36 @@ object GlassesCommands {
     fun enableP2p(ssid: String, password: String, frequency: Int): ByteArray = system(99, Proto.encode {
         message(65) { string(1, ssid); string(2, password); uint(3, frequency) }
     })
+    /**
+     * Device-verified. ADD_WIFI_CONFIG (System id 56, SetWiFIConfig.java:234): System f32 WiFiConfig {basicInfo f1 {ssid f1,
+     * authMode f2 (1 open, 2 PSK), frequency f3 (app always sends 2)}, oneof auth: psk f2 {password f1} | stub f4 {}}.
+     * Glasses join and report NOTIFY_WIFI_CONFIG_RESULT (id 98) System f64 {ssid f1, code f2 (0 ok), ip f3}.
+     */
+    fun addWifi(ssid: String, password: String): ByteArray = system(56, Proto.encode {
+        message(32) {
+            message(1) { string(1, ssid); uint(2, if (password.isEmpty()) 1 else 2); uint(3, 2) }
+            if (password.isEmpty()) message(4) {} else message(2) { string(1, password) }
+        }
+    })
+    /** Untested. GET_WIFI_CONFIG_LIST (System id 86): saved networks on the glasses. */
+    fun wifiList(): ByteArray = system(86)
+    /** Device-verified (reply supported=1). QUERY_LIVE_STREAMING (Interconnection id 45, command o95/i.java): reply f33 {supportedLiveMode f1, currentLiveMode f2}. */
+    fun liveQuery(): ByteArray = interconnection(45)
+    /**
+     * Device-verified (480p/1080p, modes 1-3). REQUEST_LIVE_STREAMING (Interconnection id 46): f34 Request {cmd f1 (1 start, 2 stop), param f2 {resolution f1,
+     * fps f2, bps f3, livePlatform f4, liveMode f5, liveUrl f6}} (StartGlassLiveStreaming.java, StopLiveLiveStreaming.java).
+     * Values (livestream/data/model): resolution 1 480p, 2 720p, 3 1080p; fps 15/24/25/30; "bps" carries StreamMode
+     * 1 auto, 2 frame rate first, 3 quality first (RTMPLiveManager.startPushLiveStream); livePlatform 0 RTMP;
+     * liveMode 1 Wi-Fi/hotspot, 2 wired, 4 via Bluetooth (LiveStreamType.toFirmwareValue). The glasses push RTMP themselves.
+     */
+    fun liveStart(url: String, resolution: Int = 2, fps: Int = 30, streamMode: Int = 1, liveMode: Int = 1): ByteArray =
+        interconnection(46, Proto.encode {
+            message(34) {
+                uint(1, 1)
+                message(2) { uint(1, resolution); uint(2, fps); uint(3, streamMode); uint(4, 0); uint(5, liveMode); string(6, url) }
+            }
+        })
+    fun liveStop(): ByteArray = interconnection(46, Proto.encode { message(34) { uint(1, 2) } })
     fun aivs(id: Int, payload: ByteArray = byteArrayOf()) = packet(14, id, 16, payload)
     /** AivsStatus (Aivs f5): voice 0 idle/1 wake/2 recording/3 standby, tts 0 idle/1 playing/2 thinking, device 0 online. */
     fun aivsStatus(voice: Int, tts: Int = 0, device: Int = 0): ByteArray = aivs(5, Proto.encode {

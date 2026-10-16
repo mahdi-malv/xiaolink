@@ -58,6 +58,22 @@ data class UiState(
     val settingsDirty: Set<Int> = emptySet(),
     val cloud: CloudState = CloudState(),
     val bind: BindState = BindState(),
+    val stream: StreamState = StreamState(),
+)
+
+/** Live stream (RTMP pushed by the glasses over their own Wi-Fi). Device-verified 2026-10-16. */
+data class StreamState(
+    val ssid: String = "",
+    val password: String = "",
+    val url: String = "",
+    /** 1 480p, 2 720p, 3 1080p. */
+    val resolution: Int = 2,
+    val fps: Int = 30,
+    /** 1 auto, 2 frame rate first, 3 quality first. */
+    val mode: Int = 1,
+    val wifi: String = "",
+    val modes: String = "",
+    val status: String = "",
 )
 
 /** Fresh bind progress. [oob] is the pairing code when the glasses use oobMode 1. */
@@ -89,6 +105,14 @@ class GlassesController private constructor(private val app: Application) {
         token = prefs.getString("token", "").orEmpty(),
         geminiKey = prefs.getString("gemini_key", null) ?: BuildConfig.GEMINI_API_KEY,
         cloud = CloudState(user = prefs.getString("cloud_user", "").orEmpty()),
+        stream = StreamState(
+            ssid = prefs.getString("stream_ssid", "").orEmpty(),
+            password = prefs.getString("stream_password", "").orEmpty(),
+            url = prefs.getString("stream_url", "").orEmpty(),
+            resolution = prefs.getInt("stream_resolution", 2),
+            fps = prefs.getInt("stream_fps", 30),
+            mode = prefs.getInt("stream_mode", 1),
+        ),
     ))
     private val cloud = XiaomiCloud(prefs)
     @Volatile private var cloudAuth: XiaomiCloud.Auth? = null
@@ -407,6 +431,38 @@ class GlassesController private constructor(private val app: Application) {
         scope.launch { kotlinx.coroutines.delay(800); readSettings() }
     }
 
+    fun editStream(f: (StreamState) -> StreamState) {
+        _ui.update { it.copy(stream = f(it.stream)) }
+        val st = _ui.value.stream
+        prefs.edit().putString("stream_ssid", st.ssid).putString("stream_password", st.password).putString("stream_url", st.url)
+            .putInt("stream_resolution", st.resolution).putInt("stream_fps", st.fps).putInt("stream_mode", st.mode).apply()
+    }
+
+    private fun streamStatus(text: String) { log("Stream: $text"); _ui.update { it.copy(stream = it.stream.copy(status = text)) } }
+
+    /** Saves the network on the glasses; they join it and report a Wi-Fi result (id 98). */
+    fun streamWifi() {
+        val s = session ?: return log("Not connected")
+        val st = _ui.value.stream
+        if (st.ssid.isBlank()) return streamStatus("Enter the Wi-Fi name")
+        streamStatus("Sending Wi-Fi ${st.ssid}…")
+        s.send(GlassesCommands.addWifi(st.ssid.trim(), st.password))
+    }
+
+    fun streamWifiList() = session?.send(GlassesCommands.wifiList()) ?: log("Not connected")
+
+    fun streamQuery() = session?.send(GlassesCommands.liveQuery()) ?: log("Not connected")
+
+    fun streamStart() {
+        val s = session ?: return log("Not connected")
+        val st = _ui.value.stream
+        if (!st.url.trim().startsWith("rtmp://")) return streamStatus("URL must start with rtmp://")
+        streamStatus("Starting ${st.url.trim()} (res ${st.resolution}, ${st.fps} fps, mode ${st.mode})…")
+        s.send(GlassesCommands.liveStart(st.url.trim(), st.resolution, st.fps, st.mode))
+    }
+
+    fun streamStop() { val s = session ?: return log("Not connected"); streamStatus("Stopping…"); s.send(GlassesCommands.liveStop()) }
+
     private fun handlePacket(packet: ByteArray) {
         GlassesSettings.parse(packet)?.let { setting -> _ui.update { it.copy(settings = setting, settingsDirty = emptySet()) } }
         GlassesCommands.batteryCapacity(packet)?.let { b -> _ui.update { it.copy(battery = b) } }
@@ -427,6 +483,12 @@ class GlassesController private constructor(private val app: Application) {
             GlassesCommands.misDid = did; prefs.edit().putString("mis_did", did).apply(); log("MIS did = $did")
         }
         if (event is GlassesEvents.P2pResult) p2pResult?.complete(event)
+        when (event) {
+            is GlassesEvents.WifiResult -> _ui.update { it.copy(stream = it.stream.copy(wifi = event.summary.removePrefix("Wi-Fi result "))) }
+            is GlassesEvents.LiveModes -> _ui.update { it.copy(stream = it.stream.copy(modes = "supported ${event.supported}, current ${event.current}")) }
+            is GlassesEvents.LiveStatus -> _ui.update { it.copy(stream = it.stream.copy(status = event.summary)) }
+            else -> Unit
+        }
         if (event is GlassesEvents.AivsWakeUp || event is GlassesEvents.AivsInstructions) closeVoiceCapture()
         if (event is GlassesEvents.AivsWakeUp) ai.onWake(event.cmd)
         if (event is GlassesEvents.AivsInstructions && 3 in event.resultTypes) ai.onStopCapture()

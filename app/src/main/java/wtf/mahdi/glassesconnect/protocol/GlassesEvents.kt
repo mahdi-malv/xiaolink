@@ -2,8 +2,8 @@ package wtf.mahdi.glassesconnect.protocol
 
 /**
  * Unsolicited reports from the glasses (button press = photo, hold = video, etc).
- * Dispatch per O95DeviceDecorator.c1: System (type 2) ids 91/99, AIVS (type 14) id 6,
- * Media (type 18) ids 16/22/23, Interconnection (type 23) ids 30/33/41/42/48/59/60.
+ * Dispatch per O95DeviceDecorator.c1: System (type 2) ids 91/98/99, AIVS (type 14) id 6,
+ * Media (type 18) ids 16/22/23, Interconnection (type 23) ids 30/33/41/42/45/47/48/59/60.
  * Field numbers from MediaProtos / InterconnectionProtos. See analysis/commands.md.
  */
 object GlassesEvents {
@@ -76,6 +76,18 @@ object GlassesEvents {
     data class P2pResult(val code: Long, val ip: String, val taskId: Long) : Event {
         override val summary get() = "Wi-Fi P2P result code=$code (${P2P_CODES[code] ?: "unknown"}) ip=$ip taskId=$taskId"
     }
+    /** WiFiConfig.Result (System id 98, f64): code 0 connected (WifiDeviceFragment.java:1148), 2 open failed, 3 low battery, 4 hot. */
+    data class WifiResult(val ssid: String, val code: Long, val ip: String) : Event {
+        override val summary get() = "Wi-Fi result ssid=$ssid code=$code (${WIFI_CODES[code] ?: "unknown"}) ip=$ip"
+    }
+    /** LiveStreaming (Interconnection id 45 reply, f33): bitmasks of liveMode (1 Wi-Fi, 2 wired, 4 Bluetooth). */
+    data class LiveModes(val supported: Long, val current: Long) : Event {
+        override val summary get() = "Live modes supported=$supported current=$current"
+    }
+    /** LiveStreaming.Status (Interconnection id 47, f35); codes per MiWearLiveStreamingHandler.e. */
+    data class LiveStatus(val code: Long, val rtspUrl: String?) : Event {
+        override val summary get() = "Live status code=$code (${LIVE_CODES[code] ?: "unknown"})" + (rtspUrl?.let { " rtsp=$it" } ?: "")
+    }
     data class GlassEvent(val code: Long?) : Event { override val summary get() = "Glass event code=$code" }
     data class Vlog(val enable: Boolean) : Event { override val summary get() = "Vlog ${if (enable) "on" else "off"}" }
 
@@ -93,6 +105,14 @@ object GlassesEvents {
 
     val P2P_CODES = mapOf(0L to "ok", 1L to "connect failed", 2L to "low battery", 3L to "high temperature", 4L to "recording")
 
+    val WIFI_CODES = mapOf(0L to "connected", 2L to "open failed", 3L to "low battery", 4L to "high temperature")
+
+    val LIVE_CODES = mapOf(
+        1L to "live", 2L to "stopped", 3L to "device occupied", 4L to "Wi-Fi failed", 5L to "RTMP failed",
+        6L to "high temperature", 7L to "low battery", 8L to "not worn", 9L to "camera blocked", 10L to "busy",
+        11L to "recording", 12L to "in a call", 13L to "busy", 14L to "updating", 15L to "reconnecting",
+    )
+
     val MEDIA_TYPES = mapOf(
         0 to "JPEG", 1 to "PNG", 2 to "MP4", 3 to "QuickTime", 4 to "PCM", 5 to "Opus", 6 to "SBC", 7 to "mSBC",
         8 to "YUV meta", 9 to "HEIC meta", 10 to "MP4 meta", 11 to "Opus image",
@@ -106,6 +126,11 @@ object GlassesEvents {
                 if (id == 99) {
                     val r = Proto.decode(Proto.bytes(Proto.decode(Proto.bytes(envelope, 4) ?: return null), 66) ?: return null)
                     return P2pResult(Proto.scalar(r, 1) ?: 0, Proto.bytes(r, 2)?.toString(Charsets.UTF_8).orEmpty(), Proto.scalar(r, 3) ?: 0)
+                }
+                if (id == 98) {
+                    val r = Proto.decode(Proto.bytes(Proto.decode(Proto.bytes(envelope, 4) ?: return null), 64) ?: return null)
+                    return WifiResult(Proto.bytes(r, 1)?.toString(Charsets.UTF_8).orEmpty(), Proto.scalar(r, 2) ?: 0,
+                        Proto.bytes(r, 3)?.toString(Charsets.UTF_8).orEmpty())
                 }
                 if (id != 91) return null
                 val alert = Proto.decode(Proto.bytes(Proto.decode(Proto.bytes(envelope, 4) ?: return null), 58) ?: return null)
@@ -154,6 +179,8 @@ object GlassesEvents {
                         CameraThumbnail(Proto.bytes(t, 1)?.toString(Charsets.UTF_8).orEmpty(), Proto.scalar(t, 2) ?: 0, Proto.scalar(t, 3) ?: 0,
                             (Proto.scalar(p, 1) ?: 0).toInt(), (Proto.scalar(p, 2) ?: 0).toInt(), Proto.bytes(p, 3) ?: byteArrayOf())
                     }
+                    45 -> Proto.bytes(ic, 33)?.let { Proto.decode(it) }?.let { LiveModes(Proto.scalar(it, 1) ?: 0, Proto.scalar(it, 2) ?: 0) }
+                    47 -> Proto.bytes(ic, 35)?.let { Proto.decode(it) }?.let { LiveStatus(Proto.scalar(it, 1) ?: 0, Proto.bytes(it, 2)?.toString(Charsets.UTF_8)) }
                     60 -> GlassEvent(Proto.bytes(ic, 48)?.let { Proto.scalar(Proto.decode(it), 1) })
                     59 -> Vlog(Proto.bytes(ic, 47)?.let { Proto.scalar(Proto.decode(it), 1) } == 1L)
                     else -> null

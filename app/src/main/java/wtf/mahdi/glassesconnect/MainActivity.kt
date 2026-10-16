@@ -63,7 +63,7 @@ private fun App(vm: GlassesController) {
         Column(Modifier.padding(padding).fillMaxSize()) {
             StatusBar(ui)
             PrimaryScrollableTabRow(selectedTabIndex = tab, edgePadding = 0.dp) {
-                listOf("Connect", "Commands", "Media", "Settings", "Log", "TODO").forEachIndexed { i, t ->
+                listOf("Connect", "Commands", "Media", "Stream", "Settings", "Log", "TODO").forEachIndexed { i, t ->
                     Tab(selected = tab == i, onClick = { tab = i }, text = { Text(t) })
                 }
             }
@@ -71,8 +71,9 @@ private fun App(vm: GlassesController) {
                 0 -> ConnectTab(ui, vm) { launcher.launch(permissions) }
                 1 -> CommandsTab(ui, vm)
                 2 -> MediaTab(ui, vm)
-                3 -> SettingsTab(ui, vm)
-                4 -> LogTab(ui.log, vm::clearLog)
+                3 -> StreamTab(ui, vm)
+                4 -> SettingsTab(ui, vm)
+                5 -> LogTab(ui.log, vm::clearLog)
                 else -> TodoTab()
             }
         }
@@ -310,6 +311,57 @@ private fun MediaRow(f: GlassesEvents.MediaFile, thumb: String?) {
             },
         )
         if (expanded && bitmap != null) androidx.compose.foundation.Image(bitmap, contentDescription = f.id, modifier = Modifier.fillMaxWidth())
+    }
+}
+
+/** Live stream (device-verified): glasses join Wi-Fi and push RTMP to [StreamState.url]. */
+@Composable
+private fun StreamTab(ui: UiState, vm: GlassesController) {
+    val st = ui.stream
+    Column(Modifier.verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        if (!ui.ready) Text("Connect and authenticate first.", color = MaterialTheme.colorScheme.error)
+        Text("The glasses join Wi-Fi and push RTMP themselves. Test receiver on a Mac on the same network:\n" +
+            "ffplay -listen 1 -i rtmp://0.0.0.0:1935/live/test", style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
+        OutlinedCard(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("1. Glasses Wi-Fi", style = MaterialTheme.typography.titleSmall)
+                OutlinedTextField(st.ssid, { v -> vm.editStream { it.copy(ssid = v) } }, label = { Text("SSID") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(st.password, { v -> vm.editStream { it.copy(password = v) } }, label = { Text("Password (empty = open)") }, singleLine = true,
+                    visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth())
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = vm::streamWifi, enabled = ui.ready) { Text("Send Wi-Fi") }
+                    OutlinedButton(onClick = vm::streamWifiList, enabled = ui.ready) { Text("Saved list") }
+                }
+                if (st.wifi.isNotEmpty()) Text(st.wifi, style = MaterialTheme.typography.bodySmall)
+            }
+        }
+        OutlinedCard(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("2. Stream", style = MaterialTheme.typography.titleSmall)
+                OutlinedTextField(st.url, { v -> vm.editStream { it.copy(url = v) } }, label = { Text("RTMP URL") },
+                    placeholder = { Text("rtmp://192.168.1.10:1935/live/test") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                StreamChoice("Resolution", st.resolution, mapOf(1 to "480p", 2 to "720p", 3 to "1080p")) { v -> vm.editStream { it.copy(resolution = v) } }
+                StreamChoice("FPS", st.fps, listOf(15, 24, 25, 30).associateWith { "$it" }) { v -> vm.editStream { it.copy(fps = v) } }
+                StreamChoice("Mode", st.mode, mapOf(1 to "Auto", 2 to "Frame rate", 3 to "Quality")) { v -> vm.editStream { it.copy(mode = v) } }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = vm::streamQuery, enabled = ui.ready) { Text("Query") }
+                    Button(onClick = vm::streamStart, enabled = ui.ready && st.url.isNotBlank()) { Text("Start") }
+                    OutlinedButton(onClick = vm::streamStop, enabled = ui.ready) { Text("Stop") }
+                }
+                if (st.modes.isNotEmpty()) Text("Modes: ${st.modes} (1 Wi-Fi, 2 wired, 4 Bluetooth)", style = MaterialTheme.typography.bodySmall)
+                if (st.status.isNotEmpty()) Text(st.status, style = MaterialTheme.typography.bodyMedium)
+            }
+        }
+    }
+}
+
+@Composable
+private fun StreamChoice(label: String, value: Int, options: Map<Int, String>, onChange: (Int) -> Unit) {
+    Column {
+        Text(label, style = MaterialTheme.typography.bodyMedium)
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            options.forEach { (v, name) -> FilterChip(selected = v == value, onClick = { onChange(v) }, label = { Text(name) }) }
+        }
     }
 }
 

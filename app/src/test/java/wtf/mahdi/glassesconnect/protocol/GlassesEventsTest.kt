@@ -87,4 +87,24 @@ class GlassesEventsTest {
         assertEquals(GlassesEvents.AivsInstructions(listOf(3)), GlassesEvents.parse(GlassesCommands.aivsStopCapture()))
         assertEquals(5, (GlassesEvents.parse(GlassesCommands.aivsWake()) as GlassesEvents.AivsWakeUp).cmd)
     }
+
+    @Test fun liveStreamCommandsAndReports() {
+        // Interconnection=f25; Request f34 {cmd f1, Param f2 {resolution, fps, bps(stream mode), platform, liveMode, url}}.
+        val start = Proto.decode(Proto.bytes(Proto.decode(GlassesCommands.liveStart("rtmp://h/a", 3, 25, 2)), 25)!!)
+        val req = Proto.decode(Proto.bytes(start, 34)!!)
+        assertEquals(1L, Proto.scalar(req, 1))
+        val param = Proto.decode(Proto.bytes(req, 2)!!)
+        assertEquals(listOf(3L, 25L, 2L, 0L, 1L), (1..5).map { Proto.scalar(param, it) })
+        assertEquals("rtmp://h/a", Proto.bytes(param, 6)!!.toString(Charsets.UTF_8))
+        assertEquals("08 17 10 2e ca 01 05 92 02 02 08 02", Proto.hex(GlassesCommands.liveStop()))
+        // System=f4; WiFiConfig f32 {basicInfo f1 {ssid, authMode 2, frequency 2}, psk f2 {password}}; open network uses stub f4.
+        assertEquals("08 02 10 38 22 11 82 02 0e 0a 07 0a 01 6e 10 02 18 02 12 03 0a 01 70", Proto.hex(GlassesCommands.addWifi("n", "p")))
+        assertTrue(Proto.hex(GlassesCommands.addWifi("n", "")).endsWith("10 01 18 02 22 00"))
+        val status = GlassesCommands.interconnection(47, Proto.encode { message(35) { uint(1, 5) } })
+        assertEquals(GlassesEvents.LiveStatus(5, null), GlassesEvents.parse(status))
+        val modes = GlassesCommands.interconnection(45, Proto.encode { message(33) { uint(1, 5); uint(2, 1) } })
+        assertEquals(GlassesEvents.LiveModes(5, 1), GlassesEvents.parse(modes))
+        val wifi = GlassesCommands.system(98, Proto.encode { message(64) { string(1, "n"); uint(2, 0); string(3, "10.0.0.5") } })
+        assertEquals(GlassesEvents.WifiResult("n", 0, "10.0.0.5"), GlassesEvents.parse(wifi))
+    }
 }
