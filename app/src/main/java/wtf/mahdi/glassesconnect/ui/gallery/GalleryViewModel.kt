@@ -60,7 +60,7 @@ class ViewerViewModel(c: GlassesController, gallery: PhoneGallery, private val c
     sealed interface Answer { data object Idle : Answer; data object Busy : Answer; data class Text(val text: String) : Answer; data class Error(val text: String) : Answer }
     private val _answer = MutableStateFlow<Answer>(Answer.Idle)
     val answer: StateFlow<Answer> = _answer.asStateFlow()
-    val hasKey get() = c.ui.value.geminiKey.isNotBlank()
+    val hasKey get() = c.ui.value.aiSettings.key.isNotBlank()
 
     fun resetAnswer() { _answer.value = Answer.Idle }
 

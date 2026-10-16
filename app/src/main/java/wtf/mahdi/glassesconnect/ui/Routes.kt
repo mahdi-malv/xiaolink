@@ -14,6 +14,9 @@ sealed interface Route : NavKey {
     data object More : Tab
 
     data class Viewer(val key: String) : Route
+    /** AI photo (files/ai-images) from the Gemini history. */
+    data class AiPhoto(val path: String) : Route
+    data object AiSettings : Route
     data object Stream : Route
     data object Settings : Route
     data class Developer(val tab: Int = 0) : Route

@@ -13,11 +13,11 @@ import java.util.concurrent.TimeUnit
  * One-shot image question (generateContent, ai.google.dev/api/generate-content). Used for the take_photo tool so the
  * Live session gets only text and never an older photo.
  */
-class GeminiVision(private val model: String) {
+class GeminiVision {
     private val client = OkHttpClient.Builder().callTimeout(TIMEOUT_S, TimeUnit.SECONDS).build()
 
     /** Blocking. Returns the answer text; throws on HTTP or parse errors. */
-    fun ask(apiKey: String, jpeg: ByteArray, question: String): String {
+    fun ask(apiKey: String, model: String, jpeg: ByteArray, question: String): String {
         val body = JSONObject().put("contents", JSONArray().put(JSONObject().put("parts", JSONArray()
             .put(JSONObject().put("inlineData", JSONObject().put("mimeType", "image/jpeg")
                 .put("data", Base64.encodeToString(jpeg, Base64.NO_WRAP))))

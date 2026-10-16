@@ -28,6 +28,8 @@ object Roadmap {
         Item("AI assistant (AIVS) / voice", Status.Todo, "Xiaomi XiaoAi cloud; likely not usable outside China."),
         Item("Kotlin mSBC decoder (replaces libsbc.so)", Status.Untested, "ai/MsbcDecoder; matches ffmpeg in unit tests. Confirm Gemini hears speech on device."),
         Item("Pass photo to Gemini", Status.Done, "Gemini Live take_photo(question) -> Aivs MultiModal cmd 1 -> 576x432 JPEG -> one-shot vision model (gemini.visionModel) -> text toolResponse. Live session holds no images."),
+        Item("Gemini history and settings", Status.Untested, "Gemini tab: turns grouped by Live session (files/ai-history.json, last 400) with the take_photo images; settings: key, Live/photo model, voice, answer language, custom instructions (added to the base prompt)."),
+        Item("Save photo by voice", Status.Untested, "Gemini Live capture_photo tool -> MIoT take-photo 2.3 (full size, shows in Gallery). Not verified that the camera accepts it during an AI turn."),
         Item("AI image capture (Aivs MultiModal)", Status.Done, "Aivs id4 MultiModal cmd 1 -> 576x432 JPEG (types 3/4) on voice channel; cmd 3 -> 960x720 original of last capture (types 9/11). Saved to files/ai-images."),
         Item("Live streaming (Interconnection 23/46)", Status.Done, "Stream screen: System 56 add Wi-Fi (result 98), 23/45 query modes, 23/46 start/stop RTMP push (480p-1080p, 15-30 fps), 23/47 status."),
         Item("Live preview on the phone", Status.Done, "stream/RtmpServer (pure Kotlin RTMP ingest, :1935) + LivePreview (MediaCodec to SurfaceView). Glasses send H.264 720p30 + AAC; audio not played yet."),

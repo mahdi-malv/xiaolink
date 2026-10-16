@@ -28,7 +28,6 @@ import wtf.mahdi.glassesconnect.ui.ControllerViewModel
 import wtf.mahdi.glassesconnect.ui.LocalController
 import wtf.mahdi.glassesconnect.ui.LocalNav
 import wtf.mahdi.glassesconnect.ui.Route
-import wtf.mahdi.glassesconnect.ui.ai.KeySheet
 import wtf.mahdi.glassesconnect.ui.components.AppBar
 import wtf.mahdi.glassesconnect.ui.components.ListGroup
 import wtf.mahdi.glassesconnect.ui.components.ListRow
@@ -36,14 +35,13 @@ import wtf.mahdi.glassesconnect.ui.components.SectionLabel
 import wtf.mahdi.glassesconnect.ui.theme.Xiao
 
 data class MoreState(val ready: Boolean, val connecting: Boolean, val state: String, val signedIn: Boolean, val user: String,
-                     val key: String, val logLines: Int, val hasToken: Boolean)
+                     val hasKey: Boolean, val logLines: Int, val hasToken: Boolean)
 
 class MoreViewModel(c: GlassesController) : ControllerViewModel(c) {
     val state: StateFlow<MoreState> = derive {
-        MoreState(it.ready, it.connecting, it.state, it.cloud.signedIn, it.cloud.user, it.geminiKey, it.log.size, it.token.isNotBlank())
+        MoreState(it.ready, it.connecting, it.state, it.cloud.signedIn, it.cloud.user, it.aiSettings.key.isNotBlank(), it.log.size, it.token.isNotBlank())
     }
     fun toggleConnection() = if (state.value.ready || state.value.connecting) { c.disconnect(); message("Disconnected") } else c.connect()
-    fun setKey(key: String) { c.setGeminiKey(key); message("API key saved") }
 }
 
 @Composable
@@ -53,7 +51,6 @@ fun MoreScreen() {
     CollectMessages(vm)
     val st by vm.state.collectAsStateWithLifecycle()
     val nav = LocalNav.current
-    var editKey by rememberSaveable { mutableStateOf(false) }
 
     Column(Modifier.fillMaxSize()) {
         AppBar("More")
@@ -73,7 +70,7 @@ fun MoreScreen() {
                     ListRow(if (st.ready || st.connecting) "Disconnect" else "Connect", st.state, R.drawable.ic_bluetooth,
                         enabled = st.hasToken, onClick = vm::toggleConnection, trailing = {})
                 }
-                row { ListRow("Gemini API key", if (st.key.isBlank()) "Not set" else "••••••••" + st.key.takeLast(4), R.drawable.ic_key, monoSubtitle = true, onClick = { editKey = true }) }
+                row { ListRow("Gemini", if (st.hasKey) "Key, models, voice, instructions" else "API key not set", R.drawable.ic_auto_awesome, onClick = { nav.go(Route.AiSettings) }) }
             }
             SectionLabel("Developer")
             ListGroup {
@@ -85,5 +82,4 @@ fun MoreScreen() {
                 style = MaterialTheme.typography.bodySmall, color = Xiao.colors.muted, textAlign = TextAlign.Center)
         }
     }
-    if (editKey) KeySheet(st.key, onSave = { vm.setKey(it); editKey = false }, onDismiss = { editKey = false })
 }

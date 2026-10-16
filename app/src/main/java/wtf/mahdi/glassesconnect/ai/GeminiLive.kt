@@ -15,12 +15,14 @@ import java.util.concurrent.TimeUnit
  * Gemini Live API session over WebSocket (ai.google.dev/api/live).
  * Input: 16 kHz s16le PCM. Output: PCM chunks with the rate from inlineData.mimeType (24 kHz by default).
  * Server voice activity detection decides when the user stops speaking.
- * Tools: [TOOL_TAKE_PHOTO] {question}. The client answers the toolCall with [sendToolResponse] (text only: the session
+ * Tools: [TOOL_TAKE_PHOTO] {question}, [TOOL_CAPTURE_PHOTO] {}. The client answers the toolCall with [sendToolResponse] (text only: the session
  * never holds images, so answers cannot come from an older photo).
  */
 class GeminiLive(
     private val apiKey: String,
     private val model: String,
+    /** Prebuilt voice name; blank = model default. */
+    private val voice: String,
     private val systemPrompt: String,
     private val listener: Listener,
 ) {
@@ -78,16 +80,23 @@ class GeminiLive(
 
     private fun setupMessage() = JSONObject().put("setup", JSONObject()
         .put("model", "models/$model")
-        .put("generationConfig", JSONObject().put("responseModalities", JSONArray().put("AUDIO")))
+        .put("generationConfig", JSONObject().put("responseModalities", JSONArray().put("AUDIO")).apply {
+            if (voice.isNotBlank()) put("speechConfig", JSONObject().put("voiceConfig",
+                JSONObject().put("prebuiltVoiceConfig", JSONObject().put("voiceName", voice))))
+        })
         .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", systemPrompt))))
         .put("tools", JSONArray().put(JSONObject().put("functionDeclarations", JSONArray().put(JSONObject()
             .put("name", TOOL_TAKE_PHOTO)
             .put("description", "Takes a new photo with the camera on the user's glasses, from the user's point of view, " +
-                "and answers a question about it. Call it every time the question needs to see what the user is looking at now.")
+                "and answers a question about it. Call it every time the question needs to see what the user is looking at now. " +
+                "The photo is not kept; to save a picture, use $TOOL_CAPTURE_PHOTO.")
             .put("parameters", JSONObject().put("type", "OBJECT")
                 .put("properties", JSONObject().put("question", JSONObject().put("type", "STRING")
                     .put("description", "The user's question about the photo, with any context needed to answer it.")))
-                .put("required", JSONArray().put("question")))))))
+                .put("required", JSONArray().put("question")))).put(JSONObject()
+            .put("name", TOOL_CAPTURE_PHOTO)
+            .put("description", "Takes a full-resolution photo with the glasses camera and saves it to the user's gallery, " +
+                "like the camera button on the glasses. Call it when the user asks to take, snap or save a picture or photo.")))))
         .put("inputAudioTranscription", JSONObject())
         .put("outputAudioTranscription", JSONObject()))
 
@@ -119,6 +128,7 @@ class GeminiLive(
 
     companion object {
         const val TOOL_TAKE_PHOTO = "take_photo"
+        const val TOOL_CAPTURE_PHOTO = "capture_photo"
     }
 
     private fun closed(reason: String) {

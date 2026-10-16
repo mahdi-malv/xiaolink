@@ -52,7 +52,9 @@ import coil3.video.VideoFrameDecoder
 import kotlinx.coroutines.launch
 import wtf.mahdi.glassesconnect.GlassesController
 import wtf.mahdi.glassesconnect.R
+import wtf.mahdi.glassesconnect.ui.ai.AiPhotoScreen
 import wtf.mahdi.glassesconnect.ui.ai.AiScreen
+import wtf.mahdi.glassesconnect.ui.ai.AiSettingsScreen
 import wtf.mahdi.glassesconnect.ui.components.ProvideSnack
 import wtf.mahdi.glassesconnect.ui.components.XIcon
 import wtf.mahdi.glassesconnect.ui.developer.DeveloperScreen
@@ -111,6 +113,8 @@ fun XiaoApp(controller: GlassesController) {
                             entry<Route.Ai> { AiScreen() }
                             entry<Route.More> { MoreScreen() }
                             entry<Route.Viewer> { ViewerScreen(it.key) }
+                            entry<Route.AiPhoto> { AiPhotoScreen(it.path) }
+                            entry<Route.AiSettings> { AiSettingsScreen() }
                             entry<Route.Stream> { StreamScreen() }
                             entry<Route.Settings> { SettingsScreen() }
                             entry<Route.Developer> { DeveloperScreen(it.tab) }

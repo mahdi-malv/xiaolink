@@ -5,13 +5,14 @@ import android.media.AudioFormat
 import android.media.AudioTrack
 import org.json.JSONObject
 import wtf.mahdi.glassesconnect.protocol.GlassesCommands
+import java.io.File
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 
 /**
  * Replaces XiaoAI with Gemini Live. Flow (device-verified parts in analysis/commands.md, AIVS section):
- * wake-up (glasses touch or phone) -> AivsStatus recording -> mSBC on voice channel -> PCM to Gemini ->
+ * wake-up (glasses touch or wake word) -> AivsStatus recording -> mSBC on voice channel -> PCM to Gemini ->
  * first reply audio: STOP_CAPTURE, play reply as media (A2DP to the glasses) -> turn complete: AivsStatus idle.
  * The Gemini session stays open for follow-up questions until [IDLE_CLOSE_S] without a wake-up.
  * Vision: Gemini calls take_photo -> Aivs MultiModal START_MM_IMG -> glasses send a 576x432 JPEG on the voice
@@ -20,24 +21,27 @@ import java.util.concurrent.TimeUnit
  * gets images: realtime video frames were applied a turn late on device (answers described the previous photo).
  * No image in [PHOTO_TIMEOUT_S] -> error response. The server ends the turn right after toolCall; that turnComplete
  * must not end our turn (answer audio follows).
+ * Each finished turn goes to [onTurn] (history on the Gemini tab); turns where nothing was heard are skipped.
  */
 class AiAssistant(
-    /** Gemini API key; read on each session start so a changed key applies without a restart. */
-    private val apiKey: () -> String,
-    private val model: String,
-    private val visionModel: String,
+    /** Read on each session start, so changed settings apply from the next wake-up. */
+    private val settings: () -> AiSettings,
     private val sendToGlasses: (ByteArray) -> Unit,
     private val log: (String) -> Unit,
     private val onState: (String) -> Unit,
+    private val onTurn: (AiTurn) -> Unit,
 ) {
     private enum class Phase { Idle, Listening, Thinking, Speaking }
 
     private val worker = Executors.newSingleThreadScheduledExecutor { Thread(it, "ai") }
-    private val vision = GeminiVision(visionModel)
+    private val vision = GeminiVision()
     private val visionWorker = Executors.newSingleThreadExecutor { Thread(it, "ai-vision") }
     private val player = Executors.newSingleThreadExecutor { Thread(it, "ai-audio") }
     private val decoder = MsbcDecoder()
     private var gemini: GeminiLive? = null
+    /** Settings of the open [gemini] session. */
+    private var sessionSettings = AiSettings()
+    private var session = 0L
     private var phase = Phase.Idle
     private var idleClose: ScheduledFuture<*>? = null
     private var track: AudioTrack? = null
@@ -49,23 +53,55 @@ class AiAssistant(
     private var photoTimeout: ScheduledFuture<*>? = null
     /** Tool response sent; waiting for the answer audio. */
     private var awaitingAnswer = false
-
-    val configured get() = apiKey().isNotBlank()
+    /** Voice packets sent to Gemini in this turn. */
+    private var micPackets = 0
+    private var thinkCheck: ScheduledFuture<*>? = null
+    private var turn = TurnDraft()
 
     /** Glasses reported a wake-up (gesture or wake word): they are already streaming the microphone. */
     fun onWake(cmd: Int) = worker.execute { startListening("glasses wake cmd=$cmd") }
 
-    /** Phone-initiated question: asks the glasses to open the microphone. */
-    fun askFromPhone() = worker.execute {
-        if (startListening("phone")) sendToGlasses(GlassesCommands.aivsWake())
+    /** User ends the turn from the phone (Stop on the Gemini tab). */
+    fun stop() = worker.execute {
+        if (phase == Phase.Idle) return@execute
+        log("AI: stopped by user")
+        stopPlayback()
+        photoCall = null; awaitingAnswer = false; photoTimeout?.cancel(false)
+        turn.error = turn.error ?: "Stopped"
+        finishTurn()
+    }
+
+    /** Settings changed: close the open session so the next wake-up uses them. */
+    fun resetSession() = worker.execute {
+        if (gemini == null) return@execute
+        log("AI: settings changed; closing the Gemini session")
+        gemini?.close(); gemini = null
+        if (phase != Phase.Idle) {
+            stopPlayback()
+            photoCall = null; awaitingAnswer = false; photoTimeout?.cancel(false)
+            turn.error = turn.error ?: "Settings changed"
+            finishTurn()
+        }
     }
 
     /** Glasses ended the microphone stream (STOP_CAPTURE instruction, e.g. own timeout or video recording). */
     fun onStopCapture() = worker.execute {
         if (phase != Phase.Listening) return@execute
+        if (micPackets == 0) {
+            // Gemini heard nothing, so it never answers: without this the turn stayed in Thinking.
+            log("AI: glasses stopped the microphone before any audio")
+            return@execute finishTurn()
+        }
         log("AI: glasses stopped the microphone; waiting for Gemini")
         gemini?.endAudio()
         setPhase(Phase.Thinking)
+        thinkCheck?.cancel(false)
+        thinkCheck = worker.schedule({
+            if (phase != Phase.Thinking || photoCall != null || awaitingAnswer) return@schedule
+            log("AI: no answer from Gemini in ${THINK_TIMEOUT_S}s")
+            turn.error = "Gemini did not answer"
+            finishTurn()
+        }, THINK_TIMEOUT_S, TimeUnit.SECONDS)
     }
 
     /** Voice channel packet (VoiceMassData). Only FIRST_VOICE (1) / FOLLOW_VOICE (2) DATA packets carry the question. */
@@ -75,24 +111,31 @@ class AiAssistant(
         if (type != 1 && type != 2) return
         worker.execute {
             if (phase != Phase.Listening) return@execute
+            micPackets++
             val pcm = decoder.decode(data.copyOfRange(12, data.size))
             if (pcm.isNotEmpty()) gemini?.sendAudio(pcm)
         }
     }
 
-    /** Complete AI image (JPEG) from the glasses. */
-    fun onImage(jpeg: ByteArray) = worker.execute {
+    /** Complete AI image (JPEG) from the glasses; [file] is its saved copy in files/ai-images. */
+    fun onImage(jpeg: ByteArray, file: File) = worker.execute {
         val call = photoCall ?: return@execute log("AI: image without a pending take_photo call; ignored")
         photoCall = null; photoTimeout?.cancel(false)
         sendToGlasses(GlassesCommands.aivsMultiModal(2))
-        log("AI: asking $visionModel about the photo (${jpeg.size} B): ${call.question}")
+        turn.photo = file.absolutePath
+        val s = sessionSettings
+        log("AI: asking ${s.vision} about the photo (${jpeg.size} B): ${call.question}")
         val started = System.currentTimeMillis()
         visionWorker.execute {
-            val result = runCatching { vision.ask(apiKey(), jpeg, call.question) }
+            val result = runCatching { vision.ask(s.key, s.vision, jpeg, call.question) }
             worker.execute {
                 val response = result.fold(
                     { log("AI vision (${System.currentTimeMillis() - started} ms): $it"); JSONObject().put("result", it) },
-                    { log("AI vision failed: ${it.message}"); JSONObject().put("error", "Could not analyse the photo.") })
+                    {
+                        log("AI vision failed: ${it.message}")
+                        turn.error = "Could not analyse the photo"
+                        JSONObject().put("error", "Could not analyse the photo.")
+                    })
                 answerToolCall(call.id, call.name, response)
             }
         }
@@ -105,6 +148,7 @@ class AiAssistant(
             if (!awaitingAnswer) return@schedule
             awaitingAnswer = false
             log("AI: no answer from Gemini in ${ANSWER_TIMEOUT_S}s")
+            turn.error = "Gemini did not answer"
             if (phase != Phase.Idle) finishTurn()
         }, ANSWER_TIMEOUT_S, TimeUnit.SECONDS)
     }
@@ -115,19 +159,25 @@ class AiAssistant(
         player.shutdown(); visionWorker.shutdown(); worker.shutdown()
     }
 
-    private fun startListening(source: String): Boolean {
-        if (!configured) { log("AI: no Gemini API key; set it on the Gemini tab"); return false }
+    private fun startListening(source: String) {
+        val s = settings()
+        if (s.key.isBlank()) return log("AI: no Gemini API key; set it on the Gemini tab")
         idleClose?.cancel(false)
+        // A wake-up during an answer starts a new turn.
+        if (phase != Phase.Idle) commitTurn()
         if (phase == Phase.Speaking) stopPlayback()
         heard.clear(); said.clear()
         decoder.reset()
+        micPackets = 0; thinkCheck?.cancel(false)
         if (gemini?.open != true) {
-            log("AI: connecting to Gemini ($model)")
-            gemini = GeminiLive(apiKey(), model, SYSTEM_PROMPT, callbacks).also { it.connect() }
+            log("AI: connecting to Gemini (${s.live})")
+            sessionSettings = s
+            session = System.currentTimeMillis()
+            gemini = GeminiLive(s.key, s.live, s.voice, s.systemPrompt(SYSTEM_PROMPT), callbacks).also { it.connect() }
         }
+        turn = TurnDraft()
         log("AI: listening ($source)")
         setPhase(Phase.Listening)
-        return true
     }
 
     private val callbacks = object : GeminiLive.Listener {
@@ -144,15 +194,16 @@ class AiAssistant(
             if (phase == Phase.Speaking) player.execute { play(pcm, sampleRate) }
         }
         override fun onToolCall(id: String, name: String, args: JSONObject) = worker.execute {
-            if (name != GeminiLive.TOOL_TAKE_PHOTO) {
+            if (name != GeminiLive.TOOL_TAKE_PHOTO && name != GeminiLive.TOOL_CAPTURE_PHOTO) {
                 gemini?.sendToolResponse(id, name, JSONObject().put("error", "Unknown function $name"))
                 return@execute
             }
-            log("AI: Gemini asked for a photo")
             if (phase == Phase.Listening) {
                 sendToGlasses(GlassesCommands.aivsStopCapture())
                 setPhase(Phase.Thinking)
             }
+            if (name == GeminiLive.TOOL_CAPTURE_PHOTO) return@execute capturePhoto(id, name)
+            log("AI: Gemini asked for a photo")
             photoCall = PhotoCall(id, name, args.optString("question").ifBlank { heard.toString().trim().ifBlank { "What do you see?" } })
             sendToGlasses(GlassesCommands.aivsMultiModal(1))
             photoTimeout?.cancel(false)
@@ -161,6 +212,7 @@ class AiAssistant(
                 photoCall = null
                 sendToGlasses(GlassesCommands.aivsMultiModal(2))
                 log("AI: no photo from the glasses in ${PHOTO_TIMEOUT_S}s")
+                turn.error = "The camera returned no photo"
                 answerToolCall(id, name, JSONObject().put("error", "The camera did not return a photo."))
             }, PHOTO_TIMEOUT_S, TimeUnit.SECONDS)
         }
@@ -168,7 +220,7 @@ class AiAssistant(
         override fun onTurnComplete() = worker.execute {
             if (heard.isNotBlank()) log("AI you: ${heard.toString().trim()}")
             if (said.isNotBlank()) log("AI gemini: ${said.toString().trim()}")
-            heard.clear(); said.clear()
+            turn.take(heard, said)
             if (photoCall != null || awaitingAnswer) return@execute
             // Report idle after the queued audio finishes playing.
             player.execute {
@@ -181,11 +233,34 @@ class AiAssistant(
             gemini = null
             photoCall = null; awaitingAnswer = false; photoTimeout?.cancel(false)
             if (phase == Phase.Listening) sendToGlasses(GlassesCommands.aivsStopCapture())
-            if (phase != Phase.Idle) finishTurn()
+            if (phase != Phase.Idle) {
+                turn.error = turn.error ?: "Gemini closed the session: $reason"
+                finishTurn()
+            }
         }
     }
 
+    /**
+     * Untested: capture_photo tool -> MIoT take-photo (siid 2, aiid 3; the same command as the Device tab Photo button).
+     * The glasses store a full-size photo; the New media event brings its thumbnail to the Gallery tab.
+     * Not verified whether the camera accepts the action during an AI turn.
+     */
+    private fun capturePhoto(id: String, name: String) {
+        if (GlassesCommands.misDid.isEmpty()) {
+            log("AI: capture_photo without a MIS did")
+            turn.error = "Camera not ready: press the glasses camera button once"
+            return answerToolCall(id, name, JSONObject().put("error",
+                "The camera is not ready: the user must press the glasses camera button once first."))
+        }
+        log("AI: Gemini asked to save a photo")
+        sendToGlasses(GlassesCommands.misAction(2, 3))
+        turn.captured = true
+        answerToolCall(id, name, JSONObject().put("result", "Photo taken and saved to the user's gallery."))
+    }
+
     private fun finishTurn() {
+        thinkCheck?.cancel(false)
+        commitTurn()
         // The glasses keep the mic open after a photo unless told to stop.
         sendToGlasses(GlassesCommands.aivsStopCapture())
         setPhase(Phase.Idle)
@@ -193,6 +268,15 @@ class AiAssistant(
         idleClose = worker.schedule({
             if (phase == Phase.Idle) { gemini?.close(); gemini = null; log("AI: Gemini session closed (idle)") }
         }, IDLE_CLOSE_S, TimeUnit.SECONDS)
+    }
+
+    /** Sends the current turn to the history once; empty turns (nothing heard, nothing said) are dropped. */
+    private fun commitTurn() {
+        turn.take(heard, said)
+        val t = turn
+        turn = TurnDraft()
+        if (t.question.isBlank() && t.answer.isBlank() && t.photo == null && !t.captured) return
+        onTurn(AiTurn(t.started, session, t.question.toString().trim(), t.answer.toString().trim(), t.photo, t.captured, t.error))
     }
 
     private fun setPhase(p: Phase) {
@@ -238,13 +322,33 @@ class AiAssistant(
 
     private class PhotoCall(val id: String, val name: String, val question: String)
 
+    /** History entry being built; a tool call spans several Gemini turnCompletes. */
+    private class TurnDraft {
+        val started = System.currentTimeMillis()
+        val question = StringBuilder()
+        val answer = StringBuilder()
+        var photo: String? = null
+        var captured = false
+        var error: String? = null
+
+        /** Moves transcripts collected since the last turnComplete into the entry. */
+        fun take(heard: StringBuilder, said: StringBuilder) {
+            if (heard.isNotBlank()) question.append(if (question.isEmpty()) "" else " ").append(heard.trim())
+            if (said.isNotBlank()) answer.append(if (answer.isEmpty()) "" else " ").append(said.trim())
+            heard.clear(); said.clear()
+        }
+    }
+
     companion object {
         const val IDLE_CLOSE_S = 120L
         const val PHOTO_TIMEOUT_S = 5L
         const val ANSWER_TIMEOUT_S = 12L
+        const val THINK_TIMEOUT_S = 15L
         const val SYSTEM_PROMPT = "You are a voice assistant running on smart glasses. The user hears you through small " +
             "speakers, so answer briefly and conversationally, in the language the user speaks. No markdown or lists. " +
             "The glasses have a camera: when a question is about what the user sees, call take_photo with the question and " +
-            "answer from its result. Call it again for every new visual question; never reuse an earlier result for a new view."
+            "answer from its result. Call it again for every new visual question; never reuse an earlier result for a new view. " +
+            "take_photo does not keep the photo. When the user asks you to take, snap or save a picture, call capture_photo; " +
+            "never say a picture was taken or saved unless capture_photo returned a result."
     }
 }

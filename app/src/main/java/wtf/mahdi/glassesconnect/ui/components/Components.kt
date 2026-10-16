@@ -273,10 +273,12 @@ fun XTextField(
     placeholder: String? = null,
     keyboardType: KeyboardType = KeyboardType.Text,
     enabled: Boolean = true,
+    /** Above 1: multi-line field with at least this many lines. */
+    minLines: Int = 1,
 ) {
     val c = Xiao.colors
     OutlinedTextField(
-        value, onChange, modifier.fillMaxWidth(), enabled = enabled, singleLine = true, label = { Text(label) },
+        value, onChange, modifier.fillMaxWidth(), enabled = enabled, singleLine = minLines == 1, minLines = minLines, label = { Text(label) },
         placeholder = placeholder?.let { { Text(it, color = c.muted) } },
         textStyle = MaterialTheme.typography.bodyLarge.let { if (mono) it.copy(fontFamily = FontFamily.Monospace) else it },
         visualTransformation = if (password) PasswordVisualTransformation() else VisualTransformation.None,

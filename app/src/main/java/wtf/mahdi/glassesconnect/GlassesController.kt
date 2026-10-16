@@ -35,8 +35,8 @@ data class UiState(
     val paired: List<PairedDevice> = emptyList(),
     val address: String = "",
     val token: String = "",
-    /** Gemini API key (Google AI Studio). Default: gemini.apiKey from local.properties (dev builds). */
-    val geminiKey: String = "",
+    /** Gemini assistant settings; key default: gemini.apiKey from local.properties (dev builds). */
+    val aiSettings: wtf.mahdi.glassesconnect.ai.AiSettings = wtf.mahdi.glassesconnect.ai.AiSettings(),
     val state: String = "Disconnected",
     val ready: Boolean = false,
     val connecting: Boolean = false,
@@ -110,7 +110,7 @@ class GlassesController private constructor(private val app: Application) {
     private val _ui = MutableStateFlow(UiState(
         address = prefs.getString("address", "").orEmpty(),
         token = prefs.getString("token", "").orEmpty(),
-        geminiKey = prefs.getString("gemini_key", null) ?: BuildConfig.GEMINI_API_KEY,
+        aiSettings = wtf.mahdi.glassesconnect.ai.AiSettings.load(prefs),
         cloud = CloudState(user = prefs.getString("cloud_user", "").orEmpty()),
         pending = loadPending(prefs),
         stream = StreamState(
@@ -134,10 +134,13 @@ class GlassesController private constructor(private val app: Application) {
     private var link: SppLink? = null
     private var session: WearSession? = null
     private val time = SimpleDateFormat("HH:mm:ss", Locale.US)
-    private val ai = AiAssistant({ _ui.value.geminiKey }, BuildConfig.GEMINI_MODEL, BuildConfig.GEMINI_VISION_MODEL,
+    /** Gemini conversations for the Gemini tab (files/ai-history.json). */
+    val aiHistory = wtf.mahdi.glassesconnect.ai.AiHistory(java.io.File(app.filesDir, "ai-history.json"))
+    private val ai = AiAssistant({ _ui.value.aiSettings },
         sendToGlasses = { packet -> session?.send(packet) },
         log = ::log,
-        onState = { st -> _ui.update { it.copy(aiState = st) }; aiWakeLock(st != "Idle") })
+        onState = { st -> _ui.update { it.copy(aiState = st) }; aiWakeLock(st != "Idle") },
+        onTurn = aiHistory::add)
 
     private val wakeLock = app.getSystemService(PowerManager::class.java)
         .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "GlassesConnect:ai").apply { setReferenceCounted(false) }
@@ -145,8 +148,8 @@ class GlassesController private constructor(private val app: Application) {
     /** Keeps the CPU on during an AI turn (screen off): audio decode, Gemini WebSocket, TTS playback. */
     private fun aiWakeLock(on: Boolean) = if (on) wakeLock.acquire(10 * 60_000L) else if (wakeLock.isHeld) wakeLock.release() else Unit
 
-    /** Asks Gemini from the phone: opens the glasses microphone without the gesture. */
-    fun askAi() = ai.askFromPhone()
+    /** Ends the current AI turn (Stop on the Gemini tab). */
+    fun stopAi() = ai.stop()
 
     fun log(line: String) {
         android.util.Log.i("GlassesConnect", line)
@@ -165,7 +168,14 @@ class GlassesController private constructor(private val app: Application) {
     }
 
     fun setAddress(value: String) { _ui.update { it.copy(address = value.trim().uppercase()) }; prefs.edit().putString("address", _ui.value.address).apply() }
-    fun setGeminiKey(value: String) { _ui.update { it.copy(geminiKey = value.trim()) }; prefs.edit().putString("gemini_key", _ui.value.geminiKey).apply() }
+    /** Saves Gemini settings; an open Gemini session closes so the next wake-up uses them. */
+    fun setAiSettings(value: wtf.mahdi.glassesconnect.ai.AiSettings) {
+        val clean = value.copy(key = value.key.trim(), liveModel = value.liveModel.trim(), visionModel = value.visionModel.trim(),
+            language = value.language.trim(), instructions = value.instructions.trim())
+        _ui.update { it.copy(aiSettings = clean) }
+        clean.save(prefs)
+        ai.resetSession()
+    }
     fun setToken(value: String) { _ui.update { it.copy(token = value.trim()) }; prefs.edit().putString("token", _ui.value.token).apply() }
 
     private fun cloudUpdate(f: (CloudState) -> CloudState) = _ui.update { it.copy(cloud = f(it.cloud)) }
@@ -640,9 +650,10 @@ class GlassesController private constructor(private val app: Application) {
             else -> "bin"
         }
         val name = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date()) + "-t$aiImageType.$ext"
-        runCatching { java.io.File(aiImageDir, name).writeBytes(bytes) }
+        val file = java.io.File(aiImageDir, name)
+        runCatching { file.writeBytes(bytes) }
         log("AI image saved: ai-images/$name (${bytes.size} of $aiImageTotal B)")
-        if (aiImageType == 3 && ext == "jpg" && bytes.size == aiImageTotal) ai.onImage(bytes)
+        if (aiImageType == 3 && ext == "jpg" && bytes.size == aiImageTotal) ai.onImage(bytes, file)
     }
 
     private fun closeVoiceCapture() {
@@ -735,8 +746,15 @@ class GlassesController private constructor(private val app: Application) {
 
     /** One-shot photo question (Gemini vision model), for photos already in the gallery. Blocking: call off the main thread. */
     fun askAboutPhoto(jpeg: ByteArray, question: String): String {
-        val key = _ui.value.geminiKey.ifBlank { error("Set the Gemini API key first") }
-        return wtf.mahdi.glassesconnect.ai.GeminiVision(BuildConfig.GEMINI_VISION_MODEL).ask(key, jpeg, question)
+        val s = _ui.value.aiSettings
+        if (s.key.isBlank()) error("Set the Gemini API key first")
+        return wtf.mahdi.glassesconnect.ai.GeminiVision().ask(s.key, s.vision, jpeg, question)
+    }
+
+    /** Copies an AI photo (files/ai-images) into the phone gallery. Blocking: call off the main thread. */
+    fun saveAiPhoto(path: String) {
+        val file = java.io.File(path)
+        file.inputStream().use { gallery.save("AI_${file.name}", file.lastModified(), it) }
     }
 
     companion object {
