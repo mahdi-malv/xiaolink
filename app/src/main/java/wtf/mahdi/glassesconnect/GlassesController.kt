@@ -43,6 +43,10 @@ data class UiState(
     val battery: Int? = null,
     val lastResponse: String = "",
     val media: List<GlassesEvents.MediaFile> = emptyList(),
+    /** Files the glasses reported since the last successful gallery sync (the "new" badge). Saved in prefs. */
+    val pending: List<GlassesEvents.MediaFile> = emptyList(),
+    /** Phone time when the camera status turned to video recording (5); null when not recording. */
+    val recordingSince: Long? = null,
     val events: List<String> = emptyList(),
     val cameraStatus: Long? = null,
     val thumbs: Map<String, String> = emptyMap(),
@@ -108,6 +112,7 @@ class GlassesController private constructor(private val app: Application) {
         token = prefs.getString("token", "").orEmpty(),
         geminiKey = prefs.getString("gemini_key", null) ?: BuildConfig.GEMINI_API_KEY,
         cloud = CloudState(user = prefs.getString("cloud_user", "").orEmpty()),
+        pending = loadPending(prefs),
         stream = StreamState(
             ssid = prefs.getString("stream_ssid", "").orEmpty(),
             password = prefs.getString("stream_password", "").orEmpty(),
@@ -488,8 +493,11 @@ class GlassesController private constructor(private val app: Application) {
             else -> emptyList()
         }
         if (event is GlassesEvents.AlertStatus) _ui.update { s ->
-            s.copy(battery = event.battery ?: s.battery, cameraStatus = event.cameraStatus ?: s.cameraStatus)
+            val camera = event.cameraStatus ?: s.cameraStatus
+            val since = if (camera == 5L) s.recordingSince ?: System.currentTimeMillis() else null
+            s.copy(battery = event.battery ?: s.battery, cameraStatus = camera, recordingSince = since)
         }
+        if (files.isNotEmpty()) setPending((files + _ui.value.pending).distinctBy { it.id }.take(200))
         val did = (event as? GlassesEvents.MisProperties)?.did ?: (event as? GlassesEvents.MisActionResponse)?.did
         if (!did.isNullOrEmpty() && did != GlassesCommands.misDid) {
             GlassesCommands.misDid = did; prefs.edit().putString("mis_did", did).apply(); log("MIS did = $did")
@@ -659,6 +667,7 @@ class GlassesController private constructor(private val app: Application) {
         val s = session ?: return log("Not connected")
         if (Build.VERSION.SDK_INT < 29) return syncStatus("Needs Android 10+")
         _ui.update { it.copy(syncing = true) }
+        val pendingAtStart = _ui.value.pending.map { it.id }.toSet()
         scope.launch(kotlinx.coroutines.Dispatchers.IO) {
             val sync = runCatching { MediaSync(app) }.getOrElse { syncStatus("Wi-Fi Direct unavailable: ${it.message}"); _ui.update { u -> u.copy(syncing = false) }; return@launch }
             try {
@@ -706,6 +715,7 @@ class GlassesController private constructor(private val app: Application) {
                 }
                 syncStatus("Done: $saved saved, $present already in gallery" +
                     if (skipped > 0) ", $skipped unsupported skipped" else "")
+                setPending(_ui.value.pending.filter { it.id !in pendingAtStart })
             } catch (e: Exception) {
                 syncStatus("Failed: ${e.message}")
             } finally {
@@ -716,7 +726,26 @@ class GlassesController private constructor(private val app: Application) {
         }
     }
 
+    private fun setPending(files: List<GlassesEvents.MediaFile>) {
+        _ui.update { it.copy(pending = files) }
+        prefs.edit().putStringSet("pending_media", files.map { f ->
+            listOf(f.id, f.type, f.size, f.timestamp, f.duration ?: "").joinToString("|")
+        }.toSet()).apply()
+    }
+
+    /** One-shot photo question (Gemini vision model), for photos already in the gallery. Blocking: call off the main thread. */
+    fun askAboutPhoto(jpeg: ByteArray, question: String): String {
+        val key = _ui.value.geminiKey.ifBlank { error("Set the Gemini API key first") }
+        return wtf.mahdi.glassesconnect.ai.GeminiVision(BuildConfig.GEMINI_VISION_MODEL).ask(key, jpeg, question)
+    }
+
     companion object {
+        private fun loadPending(prefs: android.content.SharedPreferences) = prefs.getStringSet("pending_media", emptySet()).orEmpty()
+            .mapNotNull { line ->
+                val p = line.split("|")
+                runCatching { GlassesEvents.MediaFile(p[0], p[1].toInt(), p[2].toLong(), p[3].toLong(), p[4].toLongOrNull()) }.getOrNull()
+            }.sortedByDescending { it.timestamp }
+
         @Volatile private var instance: GlassesController? = null
         fun get(context: Context): GlassesController = instance ?: synchronized(this) {
             instance ?: GlassesController(context.applicationContext as Application).also { instance = it }

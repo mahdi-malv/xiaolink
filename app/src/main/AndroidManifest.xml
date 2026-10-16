@@ -15,6 +15,10 @@
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <!-- Gallery export on API 24-28 only; API 29+ uses MediaStore without permission. -->
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
+    <!-- Gallery tab: read synced media the app did not insert itself (e.g. after a reinstall). -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
     <!-- Background session: foreground service, CDM companion, boot restart, AI wake lock. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />

@@ -116,7 +116,7 @@ class AiAssistant(
     }
 
     private fun startListening(source: String): Boolean {
-        if (!configured) { log("AI: no Gemini API key; set it on the Connect tab"); return false }
+        if (!configured) { log("AI: no Gemini API key; set it on the Gemini tab"); return false }
         idleClose?.cancel(false)
         if (phase == Phase.Speaking) stopPlayback()
         heard.clear(); said.clear()
