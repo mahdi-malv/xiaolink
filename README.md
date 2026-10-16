@@ -12,32 +12,41 @@ Unofficial Android app for the **Xiaomi AI glasses (O95)**. Use the glasses with
 | Bluetooth connection, WearAuthV2 authentication, encrypted session | Works |
 | Battery and device status | Works |
 | Photo / video capture from the phone, button capture events | Works |
-| Thumbnails over Bluetooth | Works |
-| Full-size photo/video sync to the gallery over Wi-Fi Direct (never deletes from the glasses) | Works |
+| Gallery: thumbnails over Bluetooth, full-size sync over Wi-Fi Direct (never deletes from the glasses) | Works |
 | Gemini voice assistant: touch gesture → glasses microphone → Gemini Live → answer on the glasses speakers | Works |
 | "What am I looking at?": Gemini takes a photo with the glasses camera | Works |
+| Live streaming: the glasses push RTMP to any server (480p–1080p, 15–30 fps) | Works |
+| Live preview on the phone (built-in RTMP receiver, video only) | Works |
+| Bind reset glasses to your Xiaomi account without the official app | Works |
 | Fetch the glasses key from Xiaomi cloud inside the app | Untested |
-| Bind reset glasses without the official app | Untested |
-| Glasses settings (read/write) | Untested |
+| Glasses settings (camera, AI, audio, light) | Untested |
+| Gemini history, "save a photo" by voice | Untested |
 | Background connection and auto-reconnect | Untested |
 
-The in-app **TODO** tab has the full list.
+The full list is in the app: **More → Roadmap**.
 
 ## Requirements
 
 - Android 7.0+ (Android 13+ for companion-device background reconnect).
-- Xiaomi O95 AI glasses, bound to a Xiaomi account. The glasses key (`encrypt_key`) comes from Xiaomi cloud.
+- Xiaomi O95 AI glasses and a Xiaomi account. The glasses key (`encrypt_key`) comes from Xiaomi cloud.
 - Optional: a [Gemini API key](https://aistudio.google.com/apikey) for the AI assistant.
 
 ## Setup
 
 1. Install the APK from [Releases](../../releases), or build it (see below).
 2. Pair the glasses in Android Bluetooth settings.
-3. In the app, **Connect** tab: select the glasses, then get the key:
-   - **Fetch key**: sign in with the Xiaomi account that owns the glasses. Your password goes only to Xiaomi
-     (`account.xiaomi.com`) and is not stored. The app stores the session cookie on the phone.
-4. Tap **Connect**.
-5. Optional: enter your Gemini API key on the Gemini tab. Use the glasses' assistant gesture, or tap **Ask Gemini**.
+3. Open the app. The setup wizard starts:
+   1. **Sign in** with the Xiaomi account that owns the glasses. Your password goes only to Xiaomi
+      (`account.xiaomi.com`) and is not stored. The app stores the session cookie on the phone.
+      Or paste the hex key and the glasses Bluetooth address manually.
+   2. **Select the glasses** from the paired devices, then tap **Connect**.
+   - Reset or new glasses: use **Pair new glasses** in step 2. The app binds them to your account, fetches the new
+     key and connects.
+4. Optional: open the **Gemini** tab, tap **Set up** and enter your Gemini API key. Then use the glasses' assistant
+   gesture to talk to Gemini.
+
+The app has four tabs: **Device** (status and capture), **Gallery**, **Gemini** and **More** (glasses settings, live
+stream, connection, developer tools).
 
 ## Build
 
@@ -58,6 +67,7 @@ gemini.visionModel=...       # model for photo questions
 
 - No analytics or telemetry. The app talks only to the glasses, Xiaomi cloud (key fetch / bind), and Google Gemini
   (only when you use the assistant: microphone audio and photos you ask about).
+- Live streams go only to the RTMP URL you enter, or to the phone itself for the preview.
 - The debug log is written to `Android/data/wtf.mahdi.glassesconnect/files/log.txt`. Check it for personal data
   before you attach it to an issue.
 
