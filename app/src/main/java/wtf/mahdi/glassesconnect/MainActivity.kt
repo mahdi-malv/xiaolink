@@ -352,6 +352,54 @@ private fun StreamTab(ui: UiState, vm: GlassesController) {
                 if (st.status.isNotEmpty()) Text(st.status, style = MaterialTheme.typography.bodyMedium)
             }
         }
+        PreviewCard(ui, vm)
+    }
+}
+
+/** Phone RTMP receiver + decoded video. The glasses must reach the phone (same Wi-Fi, or the phone hotspot). */
+@Composable
+private fun PreviewCard(ui: UiState, vm: GlassesController) {
+    val p = ui.stream.preview
+    OutlinedCard(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("3. Preview on this phone", style = MaterialTheme.typography.titleSmall)
+            Text("Start the receiver, tap an address to put it in the URL, then Start the stream. " +
+                "Phone and glasses must share a network: same Wi-Fi, or send the phone hotspot in step 1.", style = MaterialTheme.typography.bodySmall)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (p.listening) OutlinedButton(onClick = vm::previewStop) { Text("Stop receiver") }
+                else Button(onClick = vm::previewStart) { Text("Start receiver") }
+                OutlinedButton(onClick = vm::previewRefreshIps) { Text("Refresh IPs") }
+            }
+            if (p.listening) FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                ui.stream.phoneIps.forEach { (name, ip) ->
+                    AssistChip(onClick = { vm.usePhoneUrl(ip) }, label = { Text("$ip ($name)") })
+                }
+                if (ui.stream.phoneIps.isEmpty()) Text("No network address. Join Wi-Fi or turn on the hotspot.", style = MaterialTheme.typography.bodySmall)
+            }
+            val line = listOfNotNull(
+                if (p.listening) "Listening :1935" else null,
+                p.client?.let { "client $it" }, p.codec,
+                if (p.width > 0) "${p.width}x${p.height}" else null,
+                if (p.client != null) "${p.fps} fps, ${p.kbps} kbps" else null,
+            ).joinToString(" · ")
+            if (line.isNotEmpty()) Text(line, style = MaterialTheme.typography.bodySmall)
+            p.error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+            if (p.listening) {
+                val ratio = if (p.width > 0 && p.height > 0) p.width.toFloat() / p.height else 4f / 3f
+                androidx.compose.ui.viewinterop.AndroidView(
+                    factory = { ctx ->
+                        android.view.SurfaceView(ctx).apply {
+                            holder.addCallback(object : android.view.SurfaceHolder.Callback {
+                                override fun surfaceCreated(h: android.view.SurfaceHolder) = vm.previewSurface(h.surface)
+                                override fun surfaceChanged(h: android.view.SurfaceHolder, f: Int, w: Int, ht: Int) = Unit
+                                override fun surfaceDestroyed(h: android.view.SurfaceHolder) = vm.previewSurface(null)
+                            })
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth().aspectRatio(ratio),
+                )
+            }
+        }
     }
 }
 

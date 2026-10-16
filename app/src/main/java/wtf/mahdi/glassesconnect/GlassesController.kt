@@ -74,6 +74,9 @@ data class StreamState(
     val wifi: String = "",
     val modes: String = "",
     val status: String = "",
+    val preview: wtf.mahdi.glassesconnect.stream.PreviewState = wtf.mahdi.glassesconnect.stream.PreviewState(),
+    /** Phone IPv4 addresses (interface to address) for the receiver URL. */
+    val phoneIps: List<Pair<String, String>> = emptyList(),
 )
 
 /** Fresh bind progress. [oob] is the pairing code when the glasses use oobMode 1. */
@@ -456,10 +459,19 @@ class GlassesController private constructor(private val app: Application) {
     fun streamStart() {
         val s = session ?: return log("Not connected")
         val st = _ui.value.stream
-        if (!st.url.trim().startsWith("rtmp://")) return streamStatus("URL must start with rtmp://")
+        if (!st.url.trim().let { it.startsWith("rtmp://") || it.startsWith("rtmps://") }) return streamStatus("URL must start with rtmp:// or rtmps://")
         streamStatus("Starting ${st.url.trim()} (res ${st.resolution}, ${st.fps} fps, mode ${st.mode})…")
         s.send(GlassesCommands.liveStart(st.url.trim(), st.resolution, st.fps, st.mode))
     }
+
+    private val preview = wtf.mahdi.glassesconnect.stream.LivePreview(::log) { st -> _ui.update { it.copy(stream = it.stream.copy(preview = st)) } }
+
+    /** Starts the phone RTMP receiver (port 1935) and lists phone IPs for the URL. */
+    fun previewStart() { preview.start(); previewRefreshIps() }
+    fun previewStop() = preview.stop()
+    fun previewSurface(surface: android.view.Surface?) = preview.setSurface(surface)
+    fun previewRefreshIps() = _ui.update { it.copy(stream = it.stream.copy(phoneIps = wtf.mahdi.glassesconnect.stream.LivePreview.addresses())) }
+    fun usePhoneUrl(ip: String) = editStream { it.copy(url = "rtmp://$ip:${wtf.mahdi.glassesconnect.stream.LivePreview.PORT}/live/xiaolink") }
 
     fun streamStop() { val s = session ?: return log("Not connected"); streamStatus("Stopping…"); s.send(GlassesCommands.liveStop()) }
 
