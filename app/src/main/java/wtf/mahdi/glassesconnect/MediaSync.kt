@@ -31,7 +31,11 @@ class MediaSync(context: Context) {
     ) {
         /** Plain files can be saved as-is; zip/folder bundles need Xiaomi's native algoprocessor. */
         val plain: Boolean get() = !mimeType.endsWith("/zip") && !mimeType.endsWith("/folder")
+        /** Audio recording (two-finger gesture or RequestRecord); plain Ogg Opus file. */
+        val isAudio: Boolean get() = mimeType == "audio/ogg"
+        /** DeviceMediaDataHandler.n: fileName, else the url name; audio always gets ".ogg". */
         val name: String get() = fileName.ifEmpty { url.substringAfterLast('/') }
+            .let { if (isAudio && !it.endsWith(".ogg", ignoreCase = true)) "$it.ogg" else it }
     }
 
     private val manager = context.getSystemService(WifiP2pManager::class.java) ?: error("Wi-Fi Direct not supported")

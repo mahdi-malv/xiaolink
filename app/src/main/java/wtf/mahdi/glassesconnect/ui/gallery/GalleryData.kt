@@ -30,7 +30,7 @@ sealed interface GalleryItem {
     /** Reported by the glasses, not synced yet; [thumb] is the mass-channel thumbnail file if downloaded. */
     data class Glasses(val file: GlassesEvents.MediaFile, val thumb: String?) : GalleryItem {
         override val key get() = "g:${file.id}"
-        override val takenAt get() = file.timestamp.let { if (it > 1_000_000_000_000L) it else it * 1000 } // unit unconfirmed
+        override val takenAt get() = millis(file.timestamp)
         override val isVideo get() = file.type in VIDEO_TYPES
         override val durationMs get() = file.duration?.times(1000)
     }
@@ -40,19 +40,35 @@ sealed interface GalleryItem {
         val VIDEO_TYPES = setOf(2, 3, 10)
         val AUDIO_TYPES = setOf(4, 5, 6, 7)
 
+        /** MediaFile.timestamp to ms; unit unconfirmed (s or ms). */
+        fun millis(timestamp: Long) = if (timestamp > 1_000_000_000_000L) timestamp else timestamp * 1000
+
+        /** Recordings the glasses reported and the phone has not synced yet, newest first. */
+        fun pendingRecordings(pending: List<GlassesEvents.MediaFile>) = pending.filter { it.type in AUDIO_TYPES }.sortedByDescending { it.timestamp }
+
         /** Phone items plus unsynced glasses items, newest first. */
         fun combine(phone: List<Phone>, pending: List<GlassesEvents.MediaFile>, thumbs: Map<String, String>): List<GalleryItem> =
             (phone + pending.filter { it.type !in AUDIO_TYPES }.map { Glasses(it, thumbs[it.id]) }).sortedByDescending { it.takenAt }
     }
 }
 
+/** Audio recording synced into Recordings|Music/GlassesConnect (Ogg Opus). */
+data class Recording(val uri: Uri, val name: String, val takenAt: Long, val durationMs: Long?, val size: Long)
+
 /** Reads the app's gallery folder from MediaStore. Process-wide so Gallery and Viewer share one list. */
 class PhoneGallery private constructor(private val context: Context) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val _items = MutableStateFlow<List<GalleryItem.Phone>>(emptyList())
     val items: StateFlow<List<GalleryItem.Phone>> = _items.asStateFlow()
+    private val _recordings = MutableStateFlow<List<Recording>>(emptyList())
+    val recordings: StateFlow<List<Recording>> = _recordings.asStateFlow()
 
-    fun refresh() { scope.launch { _items.value = runCatching { query() }.getOrDefault(_items.value) } }
+    fun refresh() {
+        scope.launch {
+            _items.value = runCatching { query() }.getOrDefault(_items.value)
+            _recordings.value = runCatching { queryRecordings() }.getOrDefault(_recordings.value)
+        }
+    }
 
     private fun query(): List<GalleryItem.Phone> {
         val volume = if (Build.VERSION.SDK_INT >= 29) MediaStore.VOLUME_EXTERNAL else "external"
@@ -83,6 +99,27 @@ class PhoneGallery private constructor(private val context: Context) {
             }
         }
         return out
+    }
+
+    @Suppress("DEPRECATION")
+    private fun queryRecordings(): List<Recording> {
+        val collection = MediaStore.Audio.Media.getContentUri(if (Build.VERSION.SDK_INT >= 29) MediaStore.VOLUME_EXTERNAL else "external")
+        val pathColumn = if (Build.VERSION.SDK_INT >= 29) MediaStore.MediaColumns.RELATIVE_PATH else MediaStore.MediaColumns.DATA
+        val columns = arrayOf(
+            MediaStore.MediaColumns._ID, MediaStore.MediaColumns.DISPLAY_NAME, MediaStore.MediaColumns.DATE_TAKEN,
+            MediaStore.MediaColumns.DATE_ADDED, MediaStore.Audio.AudioColumns.DURATION, MediaStore.MediaColumns.SIZE,
+        )
+        val out = mutableListOf<Recording>()
+        context.contentResolver.query(collection, columns, "$pathColumn LIKE ?", arrayOf("%/$FOLDER/%"), null)?.use { cur ->
+            while (cur.moveToNext()) {
+                out += Recording(
+                    uri = ContentUris.withAppendedId(collection, cur.getLong(0)), name = cur.getString(1).orEmpty(),
+                    takenAt = cur.getLong(2).takeIf { it > 0 } ?: (cur.getLong(3) * 1000),
+                    durationMs = cur.getLong(4).takeIf { it > 0 }, size = cur.getLong(5),
+                )
+            }
+        }
+        return out.sortedByDescending { it.takenAt }
     }
 
     companion object {

@@ -149,6 +149,10 @@ private fun CameraPill(st: DeviceState) {
     if (since != null) {
         val elapsed by produceState(0L, since) { while (true) { value = (System.currentTimeMillis() - since) / 1000; delay(1000) } }
         Pill("Recording ${clock(elapsed)}", dot = c.rec, fg = c.rec, bg = c.recSoft)
+    } else if (st.ui.audioSince != null) {
+        val audio = st.ui.audioSince
+        val elapsed by produceState(0L, audio) { while (true) { value = (System.currentTimeMillis() - audio) / 1000; delay(1000) } }
+        Pill("Audio ${clock(elapsed)}", icon = R.drawable.ic_mic_fill, fg = c.rec, bg = c.recSoft)
     } else Pill(if (st.cameraBusy) "Camera busy" else "Camera ready", icon = R.drawable.ic_photo_camera)
 }
 

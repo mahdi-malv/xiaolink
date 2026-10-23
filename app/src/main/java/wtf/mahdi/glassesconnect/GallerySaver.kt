@@ -10,16 +10,19 @@ import java.io.File
 import java.io.InputStream
 
 /**
- * Saves glasses media into the phone gallery: Pictures/GlassesConnect and Movies/GlassesConnect.
+ * Saves glasses media into the phone gallery: Pictures/GlassesConnect and Movies/GlassesConnect;
+ * audio recordings go to Recordings/GlassesConnect (Music/ before API 31).
  * API 29+: MediaStore with RELATIVE_PATH, no permission. API 24-28: public dir + WRITE_EXTERNAL_STORAGE.
  */
 class GallerySaver(private val context: Context) {
     private val folder = "GlassesConnect"
 
     fun isVideo(name: String) = name.substringAfterLast('.').lowercase() in setOf("mp4", "mov", "3gp")
+    fun isAudio(name: String) = name.substringAfterLast('.').lowercase() in setOf("ogg", "opus")
 
     private fun mime(name: String) = when (name.substringAfterLast('.').lowercase()) {
         "mp4" -> "video/mp4"; "mov" -> "video/quicktime"; "png" -> "image/png"; "heic" -> "image/heic"
+        "ogg", "opus" -> "audio/ogg"
         else -> "image/jpeg"
     }
 
@@ -48,7 +51,7 @@ class GallerySaver(private val context: Context) {
         val values = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, name)
             put(MediaStore.MediaColumns.MIME_TYPE, mime(name))
-            put(MediaStore.MediaColumns.RELATIVE_PATH, "${if (isVideo(name)) Environment.DIRECTORY_MOVIES else Environment.DIRECTORY_PICTURES}/$folder")
+            put(MediaStore.MediaColumns.RELATIVE_PATH, "${directory(name)}/$folder")
             takenAtMillis?.let { put(MediaStore.MediaColumns.DATE_TAKEN, it) }
             put(MediaStore.MediaColumns.IS_PENDING, 1)
         }
@@ -62,13 +65,18 @@ class GallerySaver(private val context: Context) {
         return uri
     }
 
-    private fun collection(name: String): Uri =
-        if (isVideo(name)) MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
-        else MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+    private fun collection(name: String): Uri = when {
+        isAudio(name) -> MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+        isVideo(name) -> MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+        else -> MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+    }
+
+    private fun directory(name: String): String = when {
+        isAudio(name) -> if (Build.VERSION.SDK_INT >= 31) Environment.DIRECTORY_RECORDINGS else Environment.DIRECTORY_MUSIC
+        isVideo(name) -> Environment.DIRECTORY_MOVIES
+        else -> Environment.DIRECTORY_PICTURES
+    }
 
     @Suppress("DEPRECATION")
-    private fun legacyFile(name: String) = File(
-        Environment.getExternalStoragePublicDirectory(if (isVideo(name)) Environment.DIRECTORY_MOVIES else Environment.DIRECTORY_PICTURES),
-        "$folder/$name",
-    )
+    private fun legacyFile(name: String) = File(Environment.getExternalStoragePublicDirectory(directory(name)), "$folder/$name")
 }

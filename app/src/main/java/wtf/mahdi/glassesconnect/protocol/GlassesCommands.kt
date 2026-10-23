@@ -120,6 +120,8 @@ object GlassesCommands {
     })
     fun deviceStatus(): ByteArray = system(1)
     fun settings(): ByteArray = system(14, Proto.encode { message(34) { uint(1, 496) } })
+    /** GET_RECORD_STATUS: empty Media; reply id 21 carries RecordStatus (Media f19). MiWearRecordHandler.C. */
+    fun recordStatus(): ByteArray = media(21)
     /** Normal audio recording: type=0; action=0 start, action=1 stop. */
     fun record(start: Boolean): ByteArray = media(20, Proto.encode {
         message(17) { uint(1, 0); uint(2, if (start) 0 else 1) }
@@ -132,7 +134,7 @@ object GlassesCommands {
         Command("wear", "Wear status", 2, 93, "Queries whether the glasses are worn.", payload = { system(93) }),
         Command("summary", "Media summary", 18, 14, "Queries the media file summary; does not download or delete files.", payload = { media(14) }),
         Command("media_sync", "Sync media list", 18, 15, "Asks the glasses to report captured files (reply: id 16). Does not download or delete.", payload = { media(15) }),
-        Command("record_status", "Audio recording status", 18, 21, "Queries the audio recording state.", payload = { media(21) }),
+        Command("record_status", "Audio recording status", 18, 21, "Queries the audio recording state.", payload = ::recordStatus),
         Command("record_start", "Start audio recording", 18, 20, "Starts normal audio recording on the glasses. Unverified on this hardware.", true, { record(true) }),
         Command("record_stop", "Stop audio recording", 18, 20, "Stops normal audio recording. Unverified on this hardware.", true, { record(false) }),
         Command("ai_online", "AI: report online", 14, 5, "AivsStatus voice=idle, device=online. Tells the glasses the phone AI is ready.", true) { aivsStatus(0) },

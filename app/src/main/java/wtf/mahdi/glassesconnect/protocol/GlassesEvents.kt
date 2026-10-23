@@ -3,7 +3,7 @@ package wtf.mahdi.glassesconnect.protocol
 /**
  * Unsolicited reports from the glasses (button press = photo, hold = video, etc).
  * Dispatch per O95DeviceDecorator.c1: System (type 2) ids 91/98/99, AIVS (type 14) id 6,
- * Media (type 18) ids 16/22/23, Interconnection (type 23) ids 30/33/41/42/45/47/48/59/60.
+ * Media (type 18) ids 16/20/21/22/23, Interconnection (type 23) ids 30/33/41/42/45/47/48/59/60.
  * Field numbers from MediaProtos / InterconnectionProtos. See analysis/commands.md.
  */
 object GlassesEvents {
@@ -16,8 +16,22 @@ object GlassesEvents {
     data class MediaReport(val files: List<MediaFile>) : Event {
         override val summary get() = "New media: " + files.joinToString { "${it.kind} ${it.id}" }
     }
-    data class RecordStatus(val status: Long?, val files: List<MediaFile>) : Event {
-        override val summary get() = "Record status=$status" + files.joinToString("") { ", ${it.kind} ${it.id}" }
+    /**
+     * Audio recorder state (Media f19 RecordStatus, MediaProtos.java:2331): duration f1 / size f2 LimitValue {current f1, max f2},
+     * extraData f3 {mediaFile f1, status f2}. Sent as GET_RECORD_STATUS (id 21) reply and REPORT_RECORD_STATUS (id 22).
+     * status (RecordingListViewModel.addRecordStateObserver, MiWearHomeViewModel default 1): 0 recording, 1 idle, 2 ended.
+     * Inferred from the official UI; not seen on device yet. Zero fields are omitted on the wire, so an
+     * extraData without status means 0. [status] is null when extraData is absent.
+     */
+    data class RecordStatus(val status: Long?, val file: MediaFile?, val duration: Long?, val maxDuration: Long?) : Event {
+        val files get() = listOfNotNull(file)
+        val recording get() = status == 0L
+        override val summary get() = "Record status=$status (${RECORD_STATES[status] ?: "unknown"})" +
+            (duration?.let { " duration=$it/${maxDuration ?: "?"}" } ?: "") + (file?.let { ", ${it.kind} ${it.id} ${it.duration ?: "?"} s" } ?: "")
+    }
+    /** RecordResponse (Media f18, reply to REQUEST_RECORD id 20): code f1, identifier f2 {id f1}, duration f3. */
+    data class RecordResponse(val code: Long, val id: String?, val duration: Long?) : Event {
+        override val summary get() = "Record response code=$code" + (id?.let { " id=$it" } ?: "") + (duration?.let { " duration=$it" } ?: "")
     }
     data class MediaSyncRequest(val channel: Long?) : Event {
         override val summary get() = "Glasses request media sync (channel=$channel)"
@@ -103,6 +117,7 @@ object GlassesEvents {
         5 to "BT profiles disconnected", 6 to "voice interrupted", 7 to "phone network",
     )
 
+    val RECORD_STATES = mapOf(0L to "recording", 1L to "idle", 2L to "ended")
     val P2P_CODES = mapOf(0L to "ok", 1L to "connect failed", 2L to "low battery", 3L to "high temperature", 4L to "recording")
 
     val WIFI_CODES = mapOf(0L to "connected", 2L to "open failed", 3L to "low battery", 4L to "high temperature")
@@ -162,8 +177,15 @@ object GlassesEvents {
                 val media = Proto.decode(Proto.bytes(envelope, 20) ?: return null)
                 when (id) {
                     16 -> MediaReport(mediaFiles(Proto.bytes(media, 14)))
-                    22 -> Proto.bytes(media, 19)?.let { Proto.decode(it) }
-                        ?.let { s -> RecordStatus(Proto.scalar(s, 2), s.filter { it.number == 1 && it.wireType == 2 }.mapNotNull { mediaFile(it.data) }) }
+                    20 -> Proto.bytes(media, 18)?.let { Proto.decode(it) }?.let { r ->
+                        RecordResponse(Proto.scalar(r, 1) ?: 0, Proto.bytes(r, 2)?.let { Proto.bytes(Proto.decode(it), 1) }?.toString(Charsets.UTF_8), Proto.scalar(r, 3))
+                    }
+                    21, 22 -> Proto.bytes(media, 19)?.let { Proto.decode(it) }?.let { s ->
+                        val limit = Proto.bytes(s, 1)?.let { Proto.decode(it) }
+                        val extra = Proto.bytes(s, 3)?.let { Proto.decode(it) }
+                        RecordStatus(extra?.let { Proto.scalar(it, 2) ?: 0 }, extra?.let { Proto.bytes(it, 1) }?.let(::mediaFile),
+                            limit?.let { Proto.scalar(it, 1) ?: 0 }, limit?.let { Proto.scalar(it, 2) })
+                    }
                     23 -> MediaSyncRequest(Proto.bytes(media, 20)?.let { Proto.scalar(Proto.decode(it), 1) })
                     else -> null
                 }

@@ -47,6 +47,8 @@ data class UiState(
     val pending: List<GlassesEvents.MediaFile> = emptyList(),
     /** Phone time when the camera status turned to video recording (5); null when not recording. */
     val recordingSince: Long? = null,
+    /** Phone time when the glasses audio recorder started (RecordStatus 0, e.g. two-finger hold); null when idle. */
+    val audioSince: Long? = null,
     val events: List<String> = emptyList(),
     val cameraStatus: Long? = null,
     val thumbs: Map<String, String> = emptyMap(),
@@ -314,7 +316,10 @@ class GlassesController private constructor(private val app: Application) {
                             it.copy(state = "$state: $detail", ready = state == WearSession.State.Ready,
                                 connecting = state == WearSession.State.Negotiating || state == WearSession.State.Authenticating)
                         }
-                        if (state == WearSession.State.Ready) reconnectAttempt = 0
+                        if (state == WearSession.State.Ready) {
+                            reconnectAttempt = 0
+                            newSession.send(GlassesCommands.recordStatus()) // an audio recording may be running already
+                        }
                         if (state == WearSession.State.Unauthenticated && onUnauth != null) Thread({ onUnauth(newSession) }, "bind").start()
                         if (state == WearSession.State.Failed) {
                             binder?.cancel()
@@ -499,13 +504,17 @@ class GlassesController private constructor(private val app: Application) {
         log("Event: ${event.summary}")
         val files = when (event) {
             is GlassesEvents.MediaReport -> event.files
-            is GlassesEvents.RecordStatus -> event.files
+            is GlassesEvents.RecordStatus -> if (event.recording) emptyList() else event.files // file is complete only after the recording ends
             else -> emptyList()
         }
         if (event is GlassesEvents.AlertStatus) _ui.update { s ->
             val camera = event.cameraStatus ?: s.cameraStatus
             val since = if (camera == 5L) s.recordingSince ?: System.currentTimeMillis() else null
             s.copy(battery = event.battery ?: s.battery, cameraStatus = camera, recordingSince = since)
+        }
+        if (event is GlassesEvents.RecordStatus && event.status != null) _ui.update { s ->
+            val elapsed = (event.file?.duration ?: 0) * 1000 // MediaFile.duration in s (RecordingListViewModel.recordStartTime)
+            s.copy(audioSince = if (event.recording) s.audioSince ?: (System.currentTimeMillis() - elapsed) else null)
         }
         if (files.isNotEmpty()) setPending((files + _ui.value.pending).distinctBy { it.id }.take(200))
         val did = (event as? GlassesEvents.MisProperties)?.did ?: (event as? GlassesEvents.MisActionResponse)?.did

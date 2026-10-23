@@ -16,9 +16,18 @@ class GlassesEventsTest {
     }
 
     @Test fun recordStatusAndInterconnectionEvents() {
-        val status = GlassesCommands.media(22, Proto.encode { message(19) { bytes(1, file("VID.mp4", 2)); uint(2, 1) } })
+        // RecordStatus {duration f1 LimitValue {current, max}, size f2, extraData f3 {mediaFile f1, status f2}}.
+        val status = GlassesCommands.media(22, Proto.encode {
+            message(19) { message(1) { uint(1, 42); uint(2, 7200) }; message(3) { bytes(1, file("REC_1", 5)); uint(2, 2) } }
+        })
         val rs = GlassesEvents.parse(status) as GlassesEvents.RecordStatus
-        assertEquals(1L, rs.status); assertEquals("MP4", rs.files.single().kind)
+        assertEquals(2L, rs.status); assertEquals(42L, rs.duration); assertEquals(7200L, rs.maxDuration)
+        assertEquals("Opus", rs.files.single().kind); assertFalse(rs.recording)
+        // Firmware omits zero fields: extraData without status = 0 (recording).
+        val recording = GlassesCommands.media(21, Proto.encode { message(19) { message(3) { bytes(1, file("REC_2", 5)) } } })
+        assertTrue((GlassesEvents.parse(recording) as GlassesEvents.RecordStatus).recording)
+        val response = GlassesCommands.media(20, Proto.encode { message(18) { uint(1, 0); message(2) { string(1, "REC_2") }; uint(3, 5) } })
+        assertEquals(GlassesEvents.RecordResponse(0, "REC_2", 5), GlassesEvents.parse(response))
         val glass = GlassesCommands.packet(23, 60, 25, Proto.encode { message(48) { uint(1, 3) } })
         assertEquals(GlassesEvents.GlassEvent(3), GlassesEvents.parse(glass))
         val vlog = GlassesCommands.packet(23, 59, 25, Proto.encode { message(47) { uint(1, 1) } })

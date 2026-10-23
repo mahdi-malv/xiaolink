@@ -1,5 +1,6 @@
 package wtf.mahdi.glassesconnect.ui.gallery
 
+import android.content.Intent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -21,6 +22,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
@@ -44,6 +46,7 @@ import wtf.mahdi.glassesconnect.ui.Route
 import wtf.mahdi.glassesconnect.ui.components.AppBar
 import wtf.mahdi.glassesconnect.ui.components.ChipRow
 import wtf.mahdi.glassesconnect.ui.components.IconBtn
+import wtf.mahdi.glassesconnect.ui.components.Segmented
 import wtf.mahdi.glassesconnect.ui.components.XButton
 import wtf.mahdi.glassesconnect.ui.components.XIcon
 import wtf.mahdi.glassesconnect.ui.components.XLink
@@ -62,9 +65,13 @@ fun GalleryScreen() {
     val st by vm.state.collectAsStateWithLifecycle()
     val nav = LocalNav.current
     var filter by rememberSaveable { mutableIntStateOf(0) }
-    LifecycleResumeEffect(Unit) { vm.refresh(); onPauseOrDispose { } }
+    var section by rememberSaveable { mutableIntStateOf(0) } // 0 photos & videos, 1 recordings
+    val player = rememberRecordingPlayer()
+    LifecycleResumeEffect(Unit) { vm.refresh(); onPauseOrDispose { player.pause() } }
+    LaunchedEffect(section) { if (section == 0) player.pause() }
     val mediaPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { vm.refresh() }
-    val needsMediaPermission = remember(st.items.size) { Permissions.missing(context, Permissions.media).isNotEmpty() }
+    val needsMediaPermission = remember(st.items.size, st.recordings.size) { Permissions.missing(context, Permissions.media).isNotEmpty() }
+    val nothingOnPhone = if (section == 0) st.items.none { it is GalleryItem.Phone } else st.recordings.isEmpty()
 
     val shown = st.items.filter { filter == 0 || (filter == 1) == !it.isVideo }
     val days = shown.groupBy { dayLabel(it.takenAt) }
@@ -78,7 +85,8 @@ fun GalleryScreen() {
         ) {
             item(span = { GridItemSpan(maxLineSpan) }) {
                 Column(Modifier.padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 10.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                    ChipRow(listOf("All", "Photos", "Videos"), filter) { filter = it }
+                    Segmented(listOf("Photos & videos", "Recordings"), section, { section = it })
+                    if (section == 0) ChipRow(listOf("All", "Photos", "Videos"), filter) { filter = it }
                     when {
                         st.syncing -> Column(
                             Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(c.surface).padding(16.dp),
@@ -94,26 +102,34 @@ fun GalleryScreen() {
                             XIcon(R.drawable.ic_cloud_download, tint = c.accent)
                             Column(Modifier.weight(1f)) {
                                 Text("${st.pending} new on your glasses", style = MaterialTheme.typography.titleSmall)
-                                Text("Downloads over Wi-Fi Direct, then saves to Photos", style = MaterialTheme.typography.bodySmall, color = c.muted)
+                                Text("Downloads over Wi-Fi Direct to this phone", style = MaterialTheme.typography.bodySmall, color = c.muted)
                             }
                             XButton("Sync", vm::sync, enabled = st.ready)
                         }
                     }
-                    if (needsMediaPermission && st.items.none { it is GalleryItem.Phone }) Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (needsMediaPermission && nothingOnPhone) Row(verticalAlignment = Alignment.CenterVertically) {
                         Text("Synced earlier but not shown?", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, color = c.muted)
-                        XLink("Allow photo access", { mediaPermission.launch(Permissions.media) })
+                        XLink("Allow media access", { mediaPermission.launch(Permissions.media) })
                     }
                 }
             }
-            if (shown.isEmpty()) item(span = { GridItemSpan(maxLineSpan) }) { EmptyGallery() }
-            days.forEach { (day, items) ->
-                item(span = { GridItemSpan(maxLineSpan) }, key = "h:$day") {
-                    Row(Modifier.padding(start = 18.dp, end = 18.dp, top = 12.dp, bottom = 8.dp)) {
-                        Text(day, Modifier.weight(1f), style = MaterialTheme.typography.titleSmall)
-                        Text("${items.size} items", style = MaterialTheme.typography.bodySmall, color = c.muted)
-                    }
+            if (section == 1) {
+                recordings(st, player, vm::record) { rec ->
+                    val send = Intent(Intent.ACTION_SEND).setType("audio/ogg")
+                        .putExtra(Intent.EXTRA_STREAM, rec.uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    context.startActivity(Intent.createChooser(send, null))
                 }
-                items(items, key = { it.key }) { item -> MediaThumb(item, { nav.go(Route.Viewer(item.key)) }) }
+            } else {
+                if (shown.isEmpty()) item(span = { GridItemSpan(maxLineSpan) }) { EmptyGallery() }
+                days.forEach { (day, items) ->
+                    item(span = { GridItemSpan(maxLineSpan) }, key = "h:$day") {
+                        Row(Modifier.padding(start = 18.dp, end = 18.dp, top = 12.dp, bottom = 8.dp)) {
+                            Text(day, Modifier.weight(1f), style = MaterialTheme.typography.titleSmall)
+                            Text("${items.size} items", style = MaterialTheme.typography.bodySmall, color = c.muted)
+                        }
+                    }
+                    items(items, key = { it.key }) { item -> MediaThumb(item, { nav.go(Route.Viewer(item.key)) }) }
+                }
             }
         }
     }
@@ -133,7 +149,7 @@ private fun EmptyGallery() {
     }
 }
 
-private fun dayLabel(millis: Long): String {
+internal fun dayLabel(millis: Long): String {
     val day = Calendar.getInstance().apply { timeInMillis = millis }
     val today = Calendar.getInstance()
     fun same(a: Calendar, b: Calendar) = a.get(Calendar.YEAR) == b.get(Calendar.YEAR) && a.get(Calendar.DAY_OF_YEAR) == b.get(Calendar.DAY_OF_YEAR)
