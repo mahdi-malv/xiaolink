@@ -319,6 +319,10 @@ class GlassesController private constructor(private val app: Application) {
                         if (state == WearSession.State.Ready) {
                             reconnectAttempt = 0
                             newSession.send(GlassesCommands.recordStatus()) // an audio recording may be running already
+                            // Official app syncs the clock on connect (TimeSyncHandler); else file names drift.
+                            GlassesCommands.is12Hours = !android.text.format.DateFormat.is24HourFormat(app)
+                            log("Set glasses time to phone time (${java.util.TimeZone.getDefault().id})")
+                            newSession.send(GlassesCommands.setSystemTime())
                         }
                         if (state == WearSession.State.Unauthenticated && onUnauth != null) Thread({ onUnauth(newSession) }, "bind").start()
                         if (state == WearSession.State.Failed) {

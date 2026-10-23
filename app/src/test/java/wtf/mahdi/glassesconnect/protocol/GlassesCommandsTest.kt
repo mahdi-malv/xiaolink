@@ -14,6 +14,14 @@ class GlassesCommandsTest {
         assertEquals("08 0e 10 05 82 01 0e 2a 0c 08 00 10 00 18 00 20 00 28 00 30 00", Proto.hex(GlassesCommands.aivsStatus(0)))
         assertEquals("08 0e 10 00 82 01 08 0a 06 0a 04 08 03 68 00", Proto.hex(GlassesCommands.aivsStopCapture()))
     }
+    @Test fun setSystemTimeGoldenVector() {
+        // 2026-10-23 12:34:56.789 +02:00: System f4 SystemTime {date, time, timeZone {offset 8 (sint32), dst 0, id}, is12Hours 0}.
+        val bytes = GlassesCommands.setSystemTime(1792751696789L, java.util.TimeZone.getTimeZone("Europe/Copenhagen"), false)
+        assertEquals("08 02 10 03 22 31 22 2f 0a 07 08 ea 0f 10 0a 18 17 12 09 08 0c 10 22 18 38 20 95 06 " +
+            "1a 17 08 10 10 00 1a 11 45 75 72 6f 70 65 2f 43 6f 70 65 6e 68 61 67 65 6e 20 00", Proto.hex(bytes))
+        // Negative offsets use ZigZag: UTC-4 = -16 quarter hours -> 31.
+        assertEquals("08 1f", Proto.hex(Proto.encode { sint(1, -16) }))
+    }
     @Test fun batteryResponseAndUnsolicitedReport() {
         val battery = Proto.encode { uint(1, 73); uint(2, 0) }
         val status = GlassesCommands.system(1, Proto.encode { message(2) { bytes(1, battery) } })

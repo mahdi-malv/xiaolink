@@ -22,6 +22,8 @@ object Proto {
         }
         fun uint(field: Int, value: Long) { require(value >= 0); tag(field, 0); varint(value) }
         fun uint(field: Int, value: Int) = uint(field, value.toLong())
+        /** sint32 (ZigZag). */
+        fun sint(field: Int, value: Int) { tag(field, 0); varint(((value shl 1) xor (value shr 31)).toLong() and 0xffffffffL) }
         fun bytes(field: Int, value: ByteArray) { tag(field, 2); varint(value.size.toLong()); output.write(value) }
         fun string(field: Int, value: String) = bytes(field, value.toByteArray(Charsets.UTF_8))
         fun float(field: Int, value: Float) {

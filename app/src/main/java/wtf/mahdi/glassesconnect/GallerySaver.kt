@@ -27,7 +27,8 @@ class GallerySaver(private val context: Context) {
     }
 
     /** True when a file with this display name is already in our gallery folder. */
-    fun exists(name: String): Boolean {
+    fun exists(rawName: String): Boolean {
+        val name = fileName(rawName)
         if (Build.VERSION.SDK_INT < 29) return legacyFile(name).exists()
         val collection = collection(name)
         context.contentResolver.query(
@@ -39,7 +40,8 @@ class GallerySaver(private val context: Context) {
     }
 
     /** Writes [input] as [name]; the item stays hidden (IS_PENDING) until the copy is complete. */
-    fun save(name: String, takenAtMillis: Long?, input: InputStream): Uri {
+    fun save(rawName: String, takenAtMillis: Long?, input: InputStream): Uri {
+        val name = fileName(rawName)
         if (Build.VERSION.SDK_INT < 29) {
             val file = legacyFile(name).apply { parentFile?.mkdirs() }
             file.outputStream().use { input.copyTo(it) }
@@ -79,4 +81,13 @@ class GallerySaver(private val context: Context) {
 
     @Suppress("DEPRECATION")
     private fun legacyFile(name: String) = File(Environment.getExternalStoragePublicDirectory(directory(name)), "$folder/$name")
+
+    companion object {
+        /**
+         * The display name MediaStore stores: it replaces FAT-invalid characters with '_'
+         * (FileUtils.buildValidFatFilename), so the glasses name "2026-10-16 23:37.ogg" is saved as
+         * "2026-10-16 23_37.ogg". [exists] must query that name, or every sync saves the file again.
+         */
+        fun fileName(name: String) = name.map { c -> if (c.code < 0x20 || c.code == 0x7F || c in "\"*/:<>?\\|") '_' else c }.joinToString("")
+    }
 }

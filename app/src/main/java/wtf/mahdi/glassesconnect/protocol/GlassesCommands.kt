@@ -1,5 +1,8 @@
 package wtf.mahdi.glassesconnect.protocol
 
+import java.util.Calendar
+import java.util.TimeZone
+
 /** Observed O95 protobuf commands. See analysis/commands.md for APK evidence. */
 object GlassesCommands {
     data class Command(
@@ -118,6 +121,28 @@ object GlassesCommands {
             uint(2, cmd)
         }
     })
+    /** Phone 12-hour clock setting (official app: !DateFormat.is24HourFormat); set by the controller. */
+    @Volatile var is12Hours = false
+    /**
+     * Device-verified 2026-10-23 (recording names follow phone time). SetSystemTime (bluetooth/command/o95/SetSystemTime.java:38, System id 3, needResponse false): System f4 SystemTime
+     * {date f1 {year f1, month f2 (1-12), day f3}, time f2 {hour f1, minuter f2, second f3, millisecond f4},
+     * timeZone f3 {offset f1 sint32 = UTC offset incl. DST in 15-min units, dstSaving f2 = 0, id f3 (e.g. "Europe/Copenhagen")},
+     * is12Hours f4} (SystemProtos.java:11779, CommonProtos.java:902, 1305, 1462). Official app sends it on connect success and
+     * then every 30 min (O95DeviceDecorator$dealOnConnectSuccess$1 → TimeSyncHandler.e(), TimeSyncHandler$startPolling$1:59).
+     */
+    fun setSystemTime(millis: Long = System.currentTimeMillis(), zone: TimeZone = TimeZone.getDefault(),
+                      twelveHours: Boolean = is12Hours): ByteArray = system(3, Proto.encode {
+        val c = Calendar.getInstance(zone).apply { timeInMillis = millis }
+        message(4) {
+            message(1) { uint(1, c.get(Calendar.YEAR)); uint(2, c.get(Calendar.MONTH) + 1); uint(3, c.get(Calendar.DAY_OF_MONTH)) }
+            message(2) {
+                uint(1, c.get(Calendar.HOUR_OF_DAY)); uint(2, c.get(Calendar.MINUTE))
+                uint(3, c.get(Calendar.SECOND)); uint(4, (millis % 1000).toInt())
+            }
+            message(3) { sint(1, zone.getOffset(millis) / 1000 / 60 / 15); sint(2, 0); string(3, zone.id) }
+            uint(4, if (twelveHours) 1 else 0)
+        }
+    })
     fun deviceStatus(): ByteArray = system(1)
     fun settings(): ByteArray = system(14, Proto.encode { message(34) { uint(1, 496) } })
     /** GET_RECORD_STATUS: empty Media; reply id 21 carries RecordStatus (Media f19). MiWearRecordHandler.C. */
@@ -129,6 +154,7 @@ object GlassesCommands {
     val catalog: List<Command> = listOf(
         Command("status", "Battery and device status", 2, 1, "Queries battery, storage and device state.", payload = ::deviceStatus),
         Command("info", "Device information", 2, 2, "Queries firmware and device identity.", payload = { system(2) }),
+        Command("set_time", "Set system time", 2, 3, "Sets the glasses clock and time zone to the phone's. Sent on each connect.", true) { setSystemTime() },
         Command("settings", "Read settings", 2, 14, "Queries headset, media, AI, indicator and OTA settings.", payload = ::settings),
         Command("basic", "Basic status", 2, 78, "Queries basic status; firmware support needs hardware verification.", payload = { system(78) }),
         Command("wear", "Wear status", 2, 93, "Queries whether the glasses are worn.", payload = { system(93) }),
