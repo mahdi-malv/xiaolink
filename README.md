@@ -19,10 +19,10 @@ Unofficial Android app for the **Xiaomi AI glasses (O95)**. Use the glasses with
 | Live streaming: the glasses push RTMP to any server (480p–1080p, 15–30 fps) | Works |
 | Live preview on the phone (built-in RTMP receiver, video only) | Works |
 | Bind reset glasses to your Xiaomi account without the official app | Works |
-| Fetch the glasses key from Xiaomi cloud inside the app | Untested |
-| Glasses settings (camera, AI, audio, light) | Untested |
-| Gemini history, "save a photo" by voice | Untested |
-| Background connection and auto-reconnect | Untested |
+| Fetch the glasses key from Xiaomi cloud inside the app | Works |
+| Glasses settings (camera, AI, audio, light) | Works |
+| Gemini history, "save a photo" by voice | Works |
+| Background connection and auto-reconnect | Works |
 
 The full list is in the app: **More → Roadmap**.
 
