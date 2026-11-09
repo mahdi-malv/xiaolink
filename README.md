@@ -1,6 +1,10 @@
 # XiaoLink
 
-Unofficial Android app for the **Xiaomi AI glasses (O95)**. Use the glasses without the official, China-only app.
+Unofficial Android app for the **Xiaomi AI glasses ()**. Use the glasses without the official, China-only app.
+
+|||
+|--|--|
+| <img src="screenshot/img1.jpg" /> | <img src="screenshot/img2.jpg" /> |
 
 > **Not affiliated with, endorsed by, or supported by Xiaomi.** The protocol was found by reverse engineering, for
 > interoperability. Use at your own risk: an unexpected command can change device settings or void your warranty.
