@@ -10,9 +10,10 @@ Unofficial Android app for the **Xiaomi AI glasses (O95)**. Use the glasses with
 | Feature | Status |
 | --- | --- |
 | Bluetooth connection, WearAuthV2 authentication, encrypted session | Works |
-| Battery and device status | Works |
+| Battery and device status; glasses clock set from the phone on connect | Works |
 | Photo / video capture from the phone, button capture events | Works |
 | Gallery: thumbnails over Bluetooth, full-size sync over Wi-Fi Direct (never deletes from the glasses) | Works |
+| Audio recordings: start/stop from the phone or the two-finger gesture, sync and play in Gallery → Recordings | Works |
 | Gemini voice assistant: touch gesture → glasses microphone → Gemini Live → answer on the glasses speakers | Works |
 | "What am I looking at?": Gemini takes a photo with the glasses camera | Works |
 | Live streaming: the glasses push RTMP to any server (480p–1080p, 15–30 fps) | Works |
@@ -27,7 +28,8 @@ The full list is in the app: **More → Roadmap**.
 
 ## Requirements
 
-- Android 7.0+ (Android 13+ for companion-device background reconnect).
+- Android 7.0+ (Android 13+ for companion-device background reconnect). On Android 17+, allow local network access
+  for the Wi-Fi gallery sync.
 - Xiaomi O95 AI glasses and a Xiaomi account. The glasses key (`encrypt_key`) comes from Xiaomi cloud.
 - Optional: a [Gemini API key](https://aistudio.google.com/apikey) for the AI assistant.
 
@@ -45,8 +47,8 @@ The full list is in the app: **More → Roadmap**.
 4. Optional: open the **Gemini** tab, tap **Set up** and enter your Gemini API key. Then use the glasses' assistant
    gesture to talk to Gemini.
 
-The app has four tabs: **Device** (status and capture), **Gallery**, **Gemini** and **More** (glasses settings, live
-stream, connection, developer tools).
+The app has four tabs: **Device** (status and capture), **Gallery** (photos, videos, recordings), **Gemini** and
+**More** (glasses settings, live stream, connection, developer tools).
 
 ## Build
 
