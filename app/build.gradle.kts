@@ -19,8 +19,9 @@ android {
         applicationId = "wtf.mahdi.glassesconnect"
         minSdk = 24
         targetSdk = 37
-        versionCode = 1
-        versionName = "1.0"
+        // CI sets these from the git tag and run number (see .github/workflows/release.yml).
+        versionCode = providers.environmentVariable("VERSION_CODE").orNull?.toInt() ?: 1
+        versionName = providers.environmentVariable("VERSION_NAME").orNull ?: "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // Gemini Live API key (Google AI Studio) and model, from local.properties.
@@ -30,8 +31,22 @@ android {
         buildConfigField("String", "GEMINI_VISION_MODEL", "\"${localProps.getProperty("gemini.visionModel", "gemini-flash-lite-latest")}\"")
     }
 
+    // Release signing from env (CI secrets). Without RELEASE_KEYSTORE the release APK is unsigned.
+    val env = { name: String -> providers.environmentVariable(name).orNull }
+    signingConfigs {
+        env("RELEASE_KEYSTORE")?.let { path ->
+            create("release") {
+                storeFile = file(path)
+                storePassword = env("RELEASE_KEYSTORE_PASSWORD")
+                keyAlias = env("RELEASE_KEY_ALIAS")
+                keyPassword = env("RELEASE_KEY_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
+            signingConfig = signingConfigs.findByName("release")
             // Never ship a developer's key: release users enter their own in onboarding or More.
             buildConfigField("String", "GEMINI_API_KEY", "\"\"")
             optimization {
