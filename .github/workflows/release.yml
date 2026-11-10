@@ -43,5 +43,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # Notes = this version's CHANGELOG.md section; fall back to GitHub's generated notes.
+          awk -v v="${GITHUB_REF_NAME#v}" '
+            /^## \[/ { on = index($0, "## [" v "]") == 1; next }
+            /^\[.*\]: / { on = 0 }
+            on' CHANGELOG.md > notes.md
+          if [ -s notes.md ]; then notes=(--notes-file notes.md); else notes=(--generate-notes); fi
           gh release create "$GITHUB_REF_NAME" "XiaoLink-${GITHUB_REF_NAME}.apk" \
-            --title "$GITHUB_REF_NAME" --generate-notes
+            --title "$GITHUB_REF_NAME" "${notes[@]}"
