@@ -31,15 +31,21 @@ android {
         buildConfigField("String", "GEMINI_VISION_MODEL", "\"${localProps.getProperty("gemini.visionModel", "gemini-flash-lite-latest")}\"")
     }
 
-    // Release signing from env (CI secrets). Without RELEASE_KEYSTORE the release APK is unsigned.
-    val env = { name: String -> providers.environmentVariable(name).orNull }
+    // Release signing: env (CI secrets) first, then local.properties (release.storeFile,
+    // release.storePassword, release.keyAlias, release.keyPassword). storeFile is relative to
+    // the project root. Without a keystore the release APK is unsigned.
+    val signing = { envName: String, prop: String ->
+        providers.environmentVariable(envName).orNull ?: localProps.getProperty(prop)
+    }
     signingConfigs {
-        env("RELEASE_KEYSTORE")?.let { path ->
+        signing("RELEASE_KEYSTORE", "release.storeFile")?.let { path ->
+            val storePass = signing("RELEASE_KEYSTORE_PASSWORD", "release.storePassword")
             create("release") {
-                storeFile = file(path)
-                storePassword = env("RELEASE_KEYSTORE_PASSWORD")
-                keyAlias = env("RELEASE_KEY_ALIAS")
-                keyPassword = env("RELEASE_KEY_PASSWORD")
+                storeFile = rootProject.file(path)
+                storePassword = storePass
+                keyAlias = signing("RELEASE_KEY_ALIAS", "release.keyAlias") ?: "xiaolink"
+                // PKCS12: key password is the store password unless set.
+                keyPassword = signing("RELEASE_KEY_PASSWORD", "release.keyPassword") ?: storePass
             }
         }
     }
