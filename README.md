@@ -1,6 +1,6 @@
 # XiaoLink
 
-Unofficial Android app for the **Xiaomi AI glasses ()**. Use the glasses without the official, China-only app.
+Unofficial Android app for the **Xiaomi AI glasses (662D)**. Use the glasses without the official, China-only app.
 
 |||
 |--|--|
